@@ -9,7 +9,6 @@ scheduler_partials:
       factor: 0.6
       patience: 100
       min_lr: 1e-6
-      verbose: true
       _partial_: true
     interval: epoch
     frequency: 1
