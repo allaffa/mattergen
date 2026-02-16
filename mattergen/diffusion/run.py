@@ -7,23 +7,19 @@ import os
 import random
 import re
 from glob import glob
+from pathlib import Path
 from typing import Any, Mapping, TypeVar
 
 import numpy as np
-import pytorch_lightning as pl
 import torch
-import yaml
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
-from pytorch_lightning import Callback
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.cli import SaveConfigCallback
-from pytorch_lightning.utilities import rank_zero_only
 
 from mattergen.common.utils.config_utils import get_config
-from mattergen.diffusion.config import Config
+from mattergen.diffusion.config import Config, resolve_model_module_cfg
+from mattergen.diffusion.diffusion_module import DiffusionModule
 from mattergen.diffusion.exceptions import AmbiguousConfig
-from mattergen.diffusion.lightning_module import DiffusionLightningModule
+from mattergen.diffusion.native_ddp import fit as native_fit
 
 T = TypeVar("T")
 
@@ -67,27 +63,9 @@ def _find_latest_checkpoint(dirpath: str) -> str | None:
     return latest_checkpoint
 
 
-class SimpleParser:
-    def save(self, config, path, **_):
-        with open(path, "w") as f:
-            yaml.dump(config, f)
-
-
-class AddConfigCallback(Callback):
-    """Adds a copy of the config to the checkpoint, so that `load_from_checkpoint` can use it to instantiate everything."""
-
-    def __init__(self, config: dict[str, Any]):
-        self._config_dict = config
-
-    def on_save_checkpoint(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", checkpoint: dict[str, Any]
-    ) -> None:
-        checkpoint["config"] = self._config_dict
-
-
 def main(
     config: Config | DictConfig, save_config: bool = True, seed: int | None = None
-) -> tuple[pl.Trainer, pl.LightningModule]:
+) -> tuple[None, Any]:
     """
     Main entry point to train and evaluate a diffusion model.
 
@@ -106,53 +84,48 @@ def main(
         np.random.seed(seed)
         random.seed(seed)
 
-    trainer: pl.Trainer = maybe_instantiate(config.trainer, pl.Trainer)
+    trainer_backend = config.get("trainer_backend", "native_ddp")
+    if trainer_backend != "native_ddp":
+        raise ValueError(
+            "Only native PyTorch DDP training is supported. "
+            "Set trainer_backend=native_ddp."
+        )
 
-    if save_config:
-        if isinstance(config, DictConfig):
-            config_as_dict = OmegaConf.to_container(config, resolve=True)
-            # This callback will save a config.yaml file.
-            trainer.callbacks.append(
-                SaveConfigCallback(
-                    parser=SimpleParser(),
-                    config=config_as_dict,
-                    overwrite=True if config.auto_resume else False,
-                )
-            )
+    if isinstance(config, DictConfig):
+        config_as_dict = OmegaConf.to_container(config, resolve=True)
+    else:
+        raise NotImplementedError
 
-            # This callback will add a copy of the config to each checkpoint.
-            trainer.callbacks.append(AddConfigCallback(config_as_dict))
-        else:
-            raise NotImplementedError
-    datamodule: pl.LightningDataModule = maybe_instantiate(
-        config.data_module, pl.LightningDataModule
-    )
-
-    # If checkpoint_path is provided training will be resumed from this point.
-    # Beware: the old checkpoint will be deleted when a new one is saved.
+    datamodule = maybe_instantiate(config.data_module)
 
     ckpt_path = config.checkpoint_path
     if config.auto_resume:
-        # Add an additional checkpointer with a fixed directory path to restore from.
-        dirpath = os.path.join(trainer.default_root_dir, "checkpoints")
-        trainer.callbacks.append(ModelCheckpoint(dirpath=dirpath))
-        ckpt_path = _find_latest_checkpoint(dirpath)
-    pl_module: DiffusionLightningModule = maybe_instantiate(
-        config.lightning_module, DiffusionLightningModule
-    )
-    if rank_zero_only.rank == 0 and isinstance(trainer.logger, pl.loggers.WandbLogger):
-        # Log the config to wandb so that it shows up in the portal.
-        trainer.logger.experiment.config.update(
-            {**OmegaConf.to_container(config, resolve=True)},
-            allow_val_change=True,
-        )
-    trainer.fit(
-        pl_module,
+        ckpt_path = _find_latest_checkpoint(str(Path(os.getcwd()) / "checkpoints"))
+
+    model_module_cfg = resolve_model_module_cfg(config)
+    diffusion_module: DiffusionModule = instantiate(model_module_cfg.diffusion_module)
+    optimizer_partial = maybe_instantiate(model_module_cfg.get("optimizer_partial"))
+    scheduler_partials_cfg = model_module_cfg.get("scheduler_partials", [])
+    scheduler_partials = [
+        {
+            **scheduler_dict,
+            "scheduler": maybe_instantiate(scheduler_dict["scheduler"]),
+        }
+        for scheduler_dict in scheduler_partials_cfg
+    ]
+
+    native_fit(
+        diffusion_module=diffusion_module,
         datamodule=datamodule,
+        trainer_cfg=config.trainer,
+        native_cfg=config.native_trainer,
+        config_dict=config_as_dict,
         ckpt_path=ckpt_path,
+        optimizer_partial=optimizer_partial,
+        scheduler_partials=scheduler_partials,
     )
 
-    return trainer, pl_module
+    return None, diffusion_module
 
 
 def cli(argv: list[str] | None) -> None:

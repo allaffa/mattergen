@@ -17,6 +17,7 @@ MatterGen is a generative model for inorganic materials design across the period
 
 ## Table of Contents
 - [Installation](#installation)
+- [Python 3.13 source bootstrap](#python-313-source-bootstrap)
 - [Get started with a pre-trained model](#get-started-with-a-pre-trained-model)
 - [Generating materials](#generating-materials)
 - [Evaluation](#evaluation)
@@ -58,6 +59,39 @@ git lfs install
 > [!WARNING]
 > Running MatterGen on Apple Silicon is **experimental**. Use at your own risk.  
 > Further, you need to run `export PYTORCH_ENABLE_MPS_FALLBACK=1` before any training or generation run.
+
+## Python 3.13 source bootstrap
+
+For Python 3.13, we provide a repeatable bootstrap script that rebuilds the PyG native extensions (`torch-scatter`, `torch-sparse`, `torch-cluster`) from source:
+
+```bash
+./bootstrap_py313_from_source.sh
+```
+
+The script:
+- creates a Python 3.13 virtual environment,
+- installs build tools,
+- installs dependencies,
+- compiles required extension packages from source,
+- installs MatterGen in editable mode.
+
+Continuous verification is provided by [`.github/workflows/py313_source_bootstrap.yml`](.github/workflows/py313_source_bootstrap.yml), which runs the bootstrap and a native-backend smoke check on macOS with Python 3.13.
+
+Optional arguments:
+
+```bash
+# custom env path
+./bootstrap_py313_from_source.sh --venv .venv-py313
+
+# keep existing env directory
+./bootstrap_py313_from_source.sh --venv .venv-py313 --keep-existing
+```
+
+To activate the resulting environment:
+
+```bash
+source .venv/bin/activate
+```
 
 ## Get started with a pre-trained model
 We provide checkpoints of an unconditional base version of MatterGen as well as fine-tuned models for these properties:
@@ -234,8 +268,30 @@ You can train the MatterGen base model on `mp_20` using the following command.
 ```bash
 mattergen-train data_module=mp_20 ~trainer.logger
 ```
+
+### Training backend: native DDP
+
+MatterGen training supports native PyTorch DDP only (`trainer_backend=native_ddp`).
+
+Single-process CPU/GPU smoke run:
+
+```bash
+mattergen-train trainer.devices=1 trainer.num_nodes=1 ~trainer.logger
+```
+
+Multi-GPU single-node run:
+
+```bash
+torchrun --standalone --nproc_per_node=8 -m mattergen.scripts.run trainer.devices=8 trainer.num_nodes=1 ~trainer.logger
+```
+
+The native backend supports:
+- checkpoint save/load with `last.ckpt` and top-k policy from `trainer.checkpoint`,
+- `auto_resume=true` by scanning `./checkpoints`,
+- optional W&B logging on rank 0 from `trainer.logger` config (`type: wandb`).
+
 > [!NOTE]
-> For Apple Silicon training, add `~trainer.strategy trainer.accelerator=mps` to the above command.
+> For Apple Silicon training, set `trainer.accelerator=mps trainer.devices=1`.
 
 The validation loss (`loss_val`) should reach 0.4 after 360 epochs (about 80k steps). The output checkpoints can be found at `outputs/singlerun/${now:%Y-%m-%d}/${now:%H-%M-%S}`. We call this folder `$MODEL_PATH` for future reference. 
 > [!NOTE]
@@ -249,7 +305,7 @@ To train the MatterGen base model on `alex_mp_20`, use the following command:
 mattergen-train data_module=alex_mp_20 ~trainer.logger trainer.accumulate_grad_batches=4
 ```
 > [!NOTE]
-> For Apple Silicon training, add `~trainer.strategy trainer.accelerator=mps` to the above command.
+> For Apple Silicon training, set `trainer.accelerator=mps trainer.devices=1`.
 
 > [!TIP]
 > Note that a single GPU's memory usually is not enough for the batch size of 512, hence we accumulate gradients over 4 batches. If you still run out of memory, increase this further.
@@ -266,11 +322,11 @@ You can fine-tune the MatterGen base model using the following command.
 
 ```bash
 export PROPERTY=dft_mag_density
-mattergen-finetune adapter.pretrained_name=mattergen_base data_module=mp_20 +lightning_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.$PROPERTY=$PROPERTY ~trainer.logger data_module.properties=["$PROPERTY"]
+mattergen-finetune adapter.pretrained_name=mattergen_base data_module=mp_20 +model_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.$PROPERTY=$PROPERTY ~trainer.logger data_module.properties=["$PROPERTY"]
 ```
 `dft_mag_density` denotes the target property for fine-tuning. You can also fine-tune a model you've trained yourself by **replacing** `adapter.pretrained_name=mattergen_base` with `adapter.model_path=$MODEL_PATH`, filling in your model's location for `$MODEL_PATH`.
 > [!NOTE]
-> For Apple Silicon training, add `~trainer.strategy trainer.accelerator=mps` to the above command.
+> For Apple Silicon training, set `trainer.accelerator=mps trainer.devices=1`.
 
 
 > [!TIP]
@@ -283,22 +339,22 @@ You can also fine-tune MatterGen on multiple properties. For instance, to fine-t
 export PROPERTY1=dft_mag_density
 export PROPERTY2=dft_band_gap 
 export MODEL_NAME=mattergen_base
-mattergen-finetune adapter.pretrained_name=$MODEL_NAME data_module=mp_20 +lightning_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.$PROPERTY1=$PROPERTY1 +lightning_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.$PROPERTY2=$PROPERTY2 ~trainer.logger data_module.properties=["$PROPERTY1","$PROPERTY2"]
+mattergen-finetune adapter.pretrained_name=$MODEL_NAME data_module=mp_20 +model_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.$PROPERTY1=$PROPERTY1 +model_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.$PROPERTY2=$PROPERTY2 ~trainer.logger data_module.properties=["$PROPERTY1","$PROPERTY2"]
 ```
 > [!TIP]
 > Add more properties analogously by adding these overrides:
-> 1. `+lightning_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.<my_property>=<my_property>`
+> 1. `+model_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.<my_property>=<my_property>`
 > 2. Add `<my_property>` to the `data_module.properties=["$PROPERTY1","$PROPERTY2",...,<my_property>]` override.
 
 > [!NOTE]
-> For Apple Silicon training, add `~trainer.strategy trainer.accelerator=mps` to the above command.
+> For Apple Silicon training, set `trainer.accelerator=mps trainer.devices=1`.
 
 #### Fine-tune on your own property data
 You may also fine-tune MatterGen on your own property data. Essentially what you need is a property value (typically `float`) for a subset of the data you want to train on (e.g., `alex_mp_20`). Proceed as follows:
 1. Add the name of your property to the `PROPERTY_SOURCE_IDS` list inside [`mattergen/common/utils/globals.py`](mattergen/common/utils/globals.py).
 2. Add a new column with this name to the dataset(s) you want to train on, e.g., `datasets/alex_mp_20/train.csv` and `datasets/alex_mp_20/val.csv` (requires you to have followed the [pre-processing steps](#pre-process-a-dataset-for-training)).
 3. Re-run the CSV to dataset script `csv-to-dataset --csv-folder datasets/<MY_DATASET>/ --dataset-name <MY_DATASET> --cache-folder datasets/cache`, substituting your dataset name for `MY_DATASET`.
-4. Add a `<your_property>.yaml` config file to [`mattergen/conf/lightning_module/diffusion_module/model/property_embeddings`](mattergen/conf/lightning_module/diffusion_module/model/property_embeddings). If you are adding a float-valued property, you may copy an existing configuration, e.g., [`dft_mag_density.yaml`](mattergen/conf/lightning_module/diffusion_module/model/property_embeddings/dft_mag_density.yaml). More complicated properties will require you to create your own custom `PropertyEmbedding` subclass, e.g., see the [`space_group`](mattergen/conf/lightning_module/diffusion_module/model/property_embeddings/space_group.yaml) or [`chemical_system`](mattergen/conf/lightning_module/diffusion_module/model/property_embeddings/chemical_system.yaml) configs.
+4. Add a `<your_property>.yaml` config file to [mattergen/conf/model_module/diffusion_module/model/property_embeddings](mattergen/conf/model_module/diffusion_module/model/property_embeddings). If you are adding a float-valued property, you may copy an existing configuration, e.g., [dft_mag_density.yaml](mattergen/conf/model_module/diffusion_module/model/property_embeddings/dft_mag_density.yaml). More complicated properties will require you to create your own custom `PropertyEmbedding` subclass, e.g., see the [space_group](mattergen/conf/model_module/diffusion_module/model/property_embeddings/space_group.yaml) or [chemical_system](mattergen/conf/model_module/diffusion_module/model/property_embeddings/chemical_system.yaml) configs.
 5. Follow the [instructions for fine-tuning](#fine-tuning-on-property-data) and reference your own property in the same way as we used the existing properties like `dft_mag_density`.
 
 ## Data release

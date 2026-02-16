@@ -3,22 +3,22 @@
 
 from __future__ import annotations
 
-from collections import deque
 from typing import Any, Dict, Generic, Optional, Protocol, Sequence, TypeVar, Union
 
-import numpy as np
-import pytorch_lightning as pl
 import torch
 from hydra.errors import InstantiationException
 from hydra.utils import instantiate
 from omegaconf import DictConfig
-from pytorch_lightning.utilities.types import STEP_OUTPUT
-from torch.optim import AdamW, Optimizer
-from tqdm import tqdm
+from torch.optim import Optimizer
 
-from mattergen.diffusion.config import Config
+from mattergen.diffusion.config import Config, resolve_model_module_cfg
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
+from mattergen.diffusion.training_components import (
+    build_optimizers_and_schedulers,
+    calc_loss,
+    get_default_optimizer,
+)
 
 T = TypeVar("T", bound=BatchedData)
 
@@ -37,12 +37,8 @@ class SchedulerPartial(Protocol):
         raise NotImplementedError
 
 
-def get_default_optimizer(params):
-    return AdamW(params=params, lr=1e-4, weight_decay=0, amsgrad=True)
-
-
-class DiffusionLightningModule(pl.LightningModule, Generic[T]):
-    """LightningModule for instantiating and training a DiffusionModule."""
+class DiffusionLightningModule(torch.nn.Module, Generic[T]):
+    """Model wrapper for instantiating a DiffusionModule and optimizer/scheduler factories."""
 
     def __init__(
         self,
@@ -60,13 +56,18 @@ class DiffusionLightningModule(pl.LightningModule, Generic[T]):
         super().__init__()
         scheduler_partials = scheduler_partials or []
         optimizer_partial = optimizer_partial or get_default_optimizer
-        self.save_hyperparameters(
-            ignore=("optimizer_partial", "scheduler_partials", "diffusion_module")
-        )
 
         self.diffusion_module = diffusion_module
         self._optimizer_partial = optimizer_partial
         self._scheduler_partials = scheduler_partials
+
+    @property
+    def optimizer_partial(self) -> OptimizerPartial:
+        return self._optimizer_partial
+
+    @property
+    def scheduler_partials(self) -> Sequence[Dict[str, Union[Any, SchedulerPartial]]]:
+        return self._scheduler_partials
 
     @classmethod
     def load_from_checkpoint(
@@ -82,7 +83,7 @@ class DiffusionLightningModule(pl.LightningModule, Generic[T]):
         # The config should have been saved in the checkpoint by AddConfigCallback in run.py
         config = Config(**checkpoint["config"])
         try:
-            lightning_module = instantiate(config.lightning_module, **kwargs)
+            lightning_module = instantiate(resolve_model_module_cfg(config), **kwargs)
         except InstantiationException as e:
             print("Could not instantiate model from the checkpoint.")
             print(
@@ -117,56 +118,26 @@ class DiffusionLightningModule(pl.LightningModule, Generic[T]):
         return lightning_module, result
 
     def configure_optimizers(self) -> Any:
-        optimizer = self._optimizer_partial(params=self.diffusion_module.parameters())
-        if self._scheduler_partials:
-            lr_schedulers = [
-                {
-                    **scheduler_dict,
-                    "scheduler": scheduler_dict["scheduler"](
-                        optimizer=optimizer,
-                    ),
-                }
-                for scheduler_dict in self._scheduler_partials
-            ]
+        return build_optimizers_and_schedulers(
+            diffusion_module=self.diffusion_module,
+            optimizer_partial=self._optimizer_partial,
+            scheduler_partials=self._scheduler_partials,
+        )
 
-            return [
-                optimizer,
-            ], lr_schedulers
-        else:
-            return optimizer
-
-    def training_step(self, train_batch: T, batch_idx: int) -> STEP_OUTPUT:
+    def training_step(self, train_batch: T, batch_idx: int) -> torch.Tensor:
         return self._calc_loss(train_batch, True)
 
-    def validation_step(self, val_batch: T, batch_idx: int) -> Optional[STEP_OUTPUT]:
+    def validation_step(self, val_batch: T, batch_idx: int) -> torch.Tensor:
         return self._calc_loss(val_batch, False)
 
-    def test_step(self, test_batch: T, batch_idx: int) -> Optional[STEP_OUTPUT]:
+    def test_step(self, test_batch: T, batch_idx: int) -> torch.Tensor:
         return self._calc_loss(test_batch, False)
 
-    def _calc_loss(self, batch: T, train: bool) -> Optional[STEP_OUTPUT]:
+    def _calc_loss(self, batch: T, train: bool) -> torch.Tensor:
         """Calculate loss and metrics given a batch of clean data."""
-        loss, metrics = self.diffusion_module.calc_loss(batch)
-        # Log the results
-        step_type = "train" if train else "val"
-        batch_size = batch.get_batch_size()
-        self.log(
-            f"loss_{step_type}",
-            loss,
-            on_step=train,
-            on_epoch=True,
-            prog_bar=train,
-            batch_size=batch_size,
-            sync_dist=True,
-        )
-        for k, v in metrics.items():
-            self.log(
-                f"{k}_{step_type}",
-                v,
-                on_step=train,
-                on_epoch=True,
-                prog_bar=train,
-                batch_size=batch_size,
-                sync_dist=True,
-            )
+        loss, _metrics = calc_loss(self.diffusion_module, batch)
         return loss
+
+
+# Backward-compatible alias while the module/class naming migrates.
+DiffusionModelModule = DiffusionLightningModule

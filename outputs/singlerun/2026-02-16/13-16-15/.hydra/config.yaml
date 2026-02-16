@@ -1,0 +1,157 @@
+data_module:
+  _target_: mattergen.common.data.datamodule.CrystDataModule
+  _recursive_: true
+  properties: []
+  transforms:
+  - _target_: mattergen.common.data.transform.symmetrize_lattice
+    _partial_: true
+  - _target_: mattergen.common.data.transform.set_chemical_system_string
+    _partial_: true
+  dataset_transforms:
+  - _target_: mattergen.common.data.dataset_transform.filter_sparse_properties
+    _partial_: true
+  average_density: 0.05771451654022283
+  root_dir: ${oc.env:PROJECT_ROOT}/../datasets/cache/mp_20
+  train_dataset:
+    _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
+    cache_path: ${data_module.root_dir}/train
+    properties: ${data_module.properties}
+    transforms: ${data_module.transforms}
+    dataset_transforms: ${data_module.dataset_transforms}
+  val_dataset:
+    _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
+    cache_path: ${data_module.root_dir}/val
+    properties: ${data_module.properties}
+    transforms: ${data_module.transforms}
+    dataset_transforms: ${data_module.dataset_transforms}
+  test_dataset:
+    _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
+    cache_path: ${data_module.root_dir}/test
+    properties: ${data_module.properties}
+    transforms: ${data_module.transforms}
+    dataset_transforms: ${data_module.dataset_transforms}
+  num_workers:
+    train: 0
+    val: 0
+    test: 0
+  batch_size:
+    train: 8
+    val: 8
+    test: 8
+  max_epochs: 900
+trainer:
+  accelerator: cpu
+  devices: 1
+  num_nodes: 1
+  precision: 32
+  max_epochs: 1
+  accumulate_grad_batches: 1
+  gradient_clip_val: 0.5
+  gradient_clip_algorithm: value
+  check_val_every_n_epoch: 1
+  strategy: auto
+  checkpoint:
+    monitor: loss_val
+    mode: min
+    save_top_k: 1
+    save_last: true
+    every_n_epochs: 1
+    filename: '{epoch}-{loss_val:.2f}'
+  overfit_batches: 1
+  limit_val_batches: 1
+  limit_test_batches: 1
+native_trainer:
+  distributed_backend: nccl
+  find_unused_parameters: true
+  set_property_scalers: true
+  use_amp: false
+  amp_dtype: float16
+  log_every_n_steps: 50
+model_module:
+  _target_: mattergen.diffusion.lightning_module.DiffusionLightningModule
+  optimizer_partial:
+    lr: 0.0001
+    _target_: torch.optim.Adam
+    _partial_: true
+  scheduler_partials:
+  - scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      factor: 0.6
+      patience: 100
+      min_lr: 1.0e-06
+      _partial_: true
+    interval: epoch
+    frequency: 1
+    monitor: loss_train
+    strict: true
+  diffusion_module:
+    _target_: mattergen.diffusion.diffusion_module.DiffusionModule
+    loss_fn:
+      _target_: mattergen.common.loss.MaterialsLoss
+      reduce: sum
+      include_pos: true
+      include_cell: true
+      include_atomic_numbers: true
+      d3pm_hybrid_lambda: 0.01
+      weights:
+        cell: 1.0
+        pos: 0.1
+        atomic_numbers: 1.0
+    model:
+      _target_: mattergen.denoiser.GemNetTDenoiser
+      hidden_dim: 16
+      gemnet:
+        _target_: mattergen.common.gemnet.gemnet.GemNetT
+        num_targets: 1
+        latent_dim: ${eval:'${..hidden_dim} * (1 + len(${..property_embeddings}))'}
+        atom_embedding:
+          _target_: mattergen.common.gemnet.layers.embedding_block.AtomEmbedding
+          emb_size: ${...hidden_dim}
+          with_mask_type: ${eval:'${...denoise_atom_types} and "${...atom_type_diffusion}"
+            == "mask"'}
+        emb_size_atom: ${..hidden_dim}
+        emb_size_edge: ${..hidden_dim}
+        max_neighbors: 5
+        max_cell_images_per_dim: 5
+        cutoff: 7.0
+        num_blocks: 1
+        regress_stress: true
+        otf_graph: true
+        scale_file: ${oc.env:PROJECT_ROOT}/common/gemnet/gemnet-dT.json
+      denoise_atom_types: true
+      atom_type_diffusion: mask
+      property_embeddings_adapt: {}
+      property_embeddings: {}
+    corruption:
+      _target_: mattergen.diffusion.corruption.multi_corruption.MultiCorruption
+      sdes:
+        pos:
+          _target_: mattergen.common.diffusion.corruption.NumAtomsVarianceAdjustedWrappedVESDE
+          wrapping_boundary: 1.0
+          sigma_max: 5.0
+          limit_info_key: num_atoms
+        cell:
+          _target_: mattergen.common.diffusion.corruption.LatticeVPSDE.from_vpsde_config
+          vpsde_config:
+            beta_min: 0.1
+            beta_max: 20
+            limit_density: ${data_module.average_density}
+            limit_var_scaling_constant: 0.25
+      discrete_corruptions:
+        atomic_numbers:
+          _target_: mattergen.diffusion.corruption.d3pm_corruption.D3PMCorruption
+          offset: 1
+          d3pm:
+            _target_: mattergen.diffusion.d3pm.d3pm.MaskDiffusion
+            dim: 101
+            schedule:
+              _target_: mattergen.diffusion.d3pm.d3pm.create_discrete_diffusion_schedule
+              kind: standard
+              num_steps: 1000
+    pre_corruption_fn:
+      _target_: mattergen.property_embeddings.SetEmbeddingType
+      p_unconditional: 0.2
+      dropout_fields_iid: false
+auto_resume: true
+trainer_backend: native_ddp
+lightning_module: ${model_module}

@@ -11,6 +11,6 @@ adapter:
 
 defaults: []
   # path/to/config_dir@attribute.name: config_file_name
-  ## e.g., insert values from dft_bulk_modulus.yaml in /lightning_module/diffusion_module/model/property_embeddings/
+  ## e.g., insert values from dft_bulk_modulus.yaml in /model_module/diffusion_module/model/property_embeddings/
   ## into adapter.property_embeddings_adapt[dft_bulk_modulus]
-  # - /lightning_module/diffusion_module/model/property_embeddings@adapter.property_embeddings_adapt.dft_bulk_modulus: dft_bulk_modulus
+  # - /model_module/diffusion_module/model/property_embeddings@adapter.property_embeddings_adapt.dft_bulk_modulus: dft_bulk_modulus

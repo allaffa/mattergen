@@ -1,0 +1,69 @@
+name: Python 3.13 Source Bootstrap
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'bootstrap_py313_from_source.sh'
+      - 'pyproject.toml'
+      - 'README.md'
+      - 'mattergen/**'
+      - '.github/workflows/py313_source_bootstrap.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'bootstrap_py313_from_source.sh'
+      - 'pyproject.toml'
+      - 'README.md'
+      - 'mattergen/**'
+      - '.github/workflows/py313_source_bootstrap.yml'
+
+jobs:
+  bootstrap-py313-macos:
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Git LFS
+        run: |
+          brew install git-lfs
+          git lfs install
+
+      - name: Run source bootstrap
+        run: |
+          ./bootstrap_py313_from_source.sh --venv .venv --python python3.13
+
+      - name: Verify core imports
+        run: |
+          .venv/bin/python -c "import torch, hydra, omegaconf; import torch_scatter, torch_sparse, torch_cluster, torch_geometric; print('imports_ok')"
+
+      - name: Verify native backend startup
+        run: |
+          .venv/bin/python -m mattergen.scripts.run \
+            trainer_backend=native_ddp \
+            auto_resume=false \
+            trainer.max_epochs=1 \
+            trainer.check_val_every_n_epoch=1 \
+            trainer.accelerator=cpu \
+            trainer.devices=1 \
+            trainer.num_nodes=1 \
+            trainer.strategy=auto \
+            '~trainer.logger' \
+            +trainer.overfit_batches=1 \
+            +trainer.limit_val_batches=1 \
+            +trainer.limit_test_batches=1 \
+            data_module.batch_size.train=8 \
+            data_module.batch_size.val=8 \
+            data_module.batch_size.test=8 \
+            model_module.diffusion_module.model.gemnet.num_blocks=1 \
+            model_module.diffusion_module.model.gemnet.max_neighbors=5 \
+            model_module.diffusion_module.model.hidden_dim=16

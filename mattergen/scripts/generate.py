@@ -35,7 +35,7 @@ def main(
     Evaluate diffusion model against molecular metrics.
 
     Args:
-        model_path: Path to DiffusionLightningModule checkpoint directory.
+        model_path: Path to DiffusionModelModule checkpoint directory.
         output_path: Path to output directory.
         config_overrides: Overrides for the model config, e.g., `model.num_layers=3 model.hidden_dim=128`.
         properties_to_condition_on: Property value to draw conditional sampling with respect to. When this value is an empty dictionary (default), unconditional samples are drawn.
@@ -65,7 +65,7 @@ def main(
     # Disable generating element types which are not supported or not in the desired chemical
     # system (if provided).
     config_overrides += [
-        "++lightning_module.diffusion_module.model.element_mask_func={_target_:'mattergen.denoiser.mask_disallowed_elements',_partial_:True}"
+        "++model_module.diffusion_module.model.element_mask_func={_target_:'mattergen.denoiser.mask_disallowed_elements',_partial_:True}"
     ]
     properties_to_condition_on = properties_to_condition_on or {}
     target_compositions = target_compositions or []

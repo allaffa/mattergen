@@ -30,7 +30,8 @@ from mattergen.common.utils.eval_utils import (
     save_structures,
 )
 from mattergen.common.utils.globals import DEFAULT_SAMPLING_CONFIG_PATH, get_device
-from mattergen.diffusion.lightning_module import DiffusionLightningModule
+from mattergen.diffusion.config import resolve_model_module_cfg
+from mattergen.diffusion.model_module import DiffusionModelModule
 from mattergen.diffusion.sampling.pc_sampler import PredictorCorrector
 from mattergen.common.utils.data_classes import ProgressCallback
 
@@ -205,7 +206,7 @@ class CrystalGenerator:
     record_trajectories: bool = True  # store all intermediate samples by default
 
     # These attributes are set when prepare() method is called.
-    _model: DiffusionLightningModule | None = None
+    _model: DiffusionModelModule | None = None
     _cfg: DictConfig | None = None
 
     # can be used to monitor progress of generation
@@ -218,9 +219,10 @@ class CrystalGenerator:
             "please add it to mattergen.common.data.num_atoms_distribution.NUM_ATOMS_DISTRIBUTIONS."
         )
         if self.target_compositions_dict:
-            assert self.cfg.lightning_module.diffusion_module.loss_fn.weights.get(
+            model_module_cfg = resolve_model_module_cfg(self.cfg)
+            assert model_module_cfg.diffusion_module.loss_fn.weights.get(
                 "atomic_numbers", 0.0
-            ) == 0.0 and "atomic_numbers" not in self.cfg.lightning_module.diffusion_module.corruption.get(
+            ) == 0.0 and "atomic_numbers" not in model_module_cfg.diffusion_module.corruption.get(
                 "discrete_corruptions", {}
             ), "Input model appears to have been trained for crystal generation (i.e., with atom type denoising), not crystal structure prediction. Please use a model trained for crystal structure prediction instead."
             sampling_cfg = self._load_sampling_config(
@@ -237,7 +239,7 @@ class CrystalGenerator:
                 )
 
     @property
-    def model(self) -> DiffusionLightningModule:
+    def model(self) -> DiffusionModelModule:
         self.prepare()
         assert self._model is not None
         return self._model

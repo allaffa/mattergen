@@ -1,0 +1,6 @@
+distributed_backend: nccl
+find_unused_parameters: true
+set_property_scalers: true
+use_amp: false
+amp_dtype: float16
+log_every_n_steps: 50

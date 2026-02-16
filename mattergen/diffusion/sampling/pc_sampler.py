@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 from mattergen.diffusion.corruption.multi_corruption import MultiCorruption, apply
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
-from mattergen.diffusion.lightning_module import DiffusionLightningModule
+from mattergen.diffusion.model_module import DiffusionModelModule
 from mattergen.diffusion.sampling.pc_partials import CorrectorPartial, PredictorPartial
 
 Diffusable = TypeVar(
@@ -94,8 +94,18 @@ class PredictorCorrector(Generic[Diffusable]):
         return self._diffusion_module.score_fn(x, t)
 
     @classmethod
-    def from_pl_module(cls, pl_module: DiffusionLightningModule, **kwargs) -> PredictorCorrector:
-        return cls(diffusion_module=pl_module.diffusion_module, device=pl_module.device, **kwargs)
+    def from_model_module(
+        cls, model_module: DiffusionModelModule, **kwargs
+    ) -> PredictorCorrector:
+        return cls(
+            diffusion_module=model_module.diffusion_module,
+            device=model_module.device,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_pl_module(cls, pl_module: DiffusionModelModule, **kwargs) -> PredictorCorrector:
+        return cls.from_model_module(pl_module, **kwargs)
 
     @torch.no_grad()
     def sample(
