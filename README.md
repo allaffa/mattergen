@@ -285,15 +285,30 @@ Multi-GPU single-node run:
 torchrun --standalone --nproc_per_node=8 -m mattergen.scripts.run trainer.devices=8 trainer.num_nodes=1 ~trainer.logger
 ```
 
+Minimal checkpoint smoke test (single process):
+
+```bash
+PROJECT_ROOT=$PWD OUTPUT_DIR=outputs/smoke_train_mp20 \
+mattergen-train \
+  data_module.root_dir=$PWD/datasets/cache/mp_20 \
+  trainer.max_epochs=1 \
+  trainer.check_val_every_n_epoch=1 \
+  trainer.devices=1 trainer.num_nodes=1 \
+  ~trainer.logger \
+  hydra.run.dir=outputs/smoke_train_mp20
+
+ls outputs/smoke_train_mp20/checkpoints
+```
+
 The native backend supports:
 - checkpoint save/load with `last.ckpt` and top-k policy from `trainer.checkpoint`,
-- `auto_resume=true` by scanning `./checkpoints`,
+- `auto_resume=true` by scanning `<run_dir>/checkpoints`,
 - optional W&B logging on rank 0 from `trainer.logger` config (`type: wandb`).
 
 > [!NOTE]
 > For Apple Silicon training, set `trainer.accelerator=mps trainer.devices=1`.
 
-The validation loss (`loss_val`) should reach 0.4 after 360 epochs (about 80k steps). The output checkpoints can be found at `outputs/singlerun/${now:%Y-%m-%d}/${now:%H-%M-%S}`. We call this folder `$MODEL_PATH` for future reference. 
+The validation loss (`loss_val`) should reach 0.4 after 360 epochs (about 80k steps). Checkpoints are written under `<run_dir>/checkpoints` (default run dir: `outputs/singlerun/${now:%Y-%m-%d}/${now:%H-%M-%S}`). We call the run directory `$MODEL_PATH` for future reference.
 > [!NOTE]
 > We use [`hydra`](https://hydra.cc/docs/intro/) to configure our training and sampling jobs. The hierarchical configuration can be found under [`mattergen/conf`](mattergen/conf). In the following we make use of `hydra`'s config overrides to update these configs via the CLI. See the `hydra` [documentation](https://hydra.cc/docs/advanced/override_grammar/basic/) for an introduction to the config override syntax.
 
@@ -318,11 +333,25 @@ To sample from this model, pass `--target_compositions=['{"<element1>": <number_
 An example composition could be `--target_compositions=['{"Na": 1, "Cl": 1}']`.
 ### Fine-tuning on property data
 
+Fine-tuning also supports native PyTorch DDP only (`trainer_backend=native_ddp`).
+
 You can fine-tune the MatterGen base model using the following command.
 
 ```bash
 export PROPERTY=dft_mag_density
 mattergen-finetune adapter.pretrained_name=mattergen_base data_module=mp_20 +model_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.$PROPERTY=$PROPERTY ~trainer.logger data_module.properties=["$PROPERTY"]
+```
+
+For multi-GPU fine-tuning, launch with `torchrun`:
+
+```bash
+torchrun --standalone --nproc_per_node=8 -m mattergen.scripts.finetune \
+  adapter.pretrained_name=mattergen_base \
+  data_module=mp_20 \
+  +model_module/diffusion_module/model/property_embeddings@adapter.adapter.property_embeddings_adapt.$PROPERTY=$PROPERTY \
+  data_module.properties=["$PROPERTY"] \
+  trainer.devices=8 trainer.num_nodes=1 \
+  ~trainer.logger
 ```
 `dft_mag_density` denotes the target property for fine-tuning. You can also fine-tune a model you've trained yourself by **replacing** `adapter.pretrained_name=mattergen_base` with `adapter.model_path=$MODEL_PATH`, filling in your model's location for `$MODEL_PATH`.
 > [!NOTE]
