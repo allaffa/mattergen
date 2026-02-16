@@ -1,6 +1,0 @@
-- trainer.max_epochs=0
-- trainer.accelerator=cpu
-- trainer.devices=1
-- trainer.num_nodes=1
-- ~trainer.logger
-- lightning_module.diffusion_module.model.hidden_dim=16

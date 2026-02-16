@@ -399,3 +399,13 @@ FodyWeavers.xsd
 
 # Virtual environment
 .venv/
+
+# Local OS/editor artifacts
+.DS_Store
+
+# Python packaging artifacts
+*.egg-info/
+
+# Generated run outputs and caches
+outputs/singlerun/
+datasets/cache/
