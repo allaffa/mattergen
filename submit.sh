@@ -12,7 +12,7 @@
  
 
 CASE_ROOT=/lustre/orion/lrn070/proj-shared/zhangp/mattergen
-source $CASE_ROOT/module-to-load-frontier-rocm640.sh
+source $CASE_ROOT/installation_scripts/module-to-load-frontier-rocm720.sh
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 export PYTHONPATH=/lustre/orion/lrn070/world-shared/mlupopa/HydraGNN-Installation-Frontier/ADIOS2-Frontier/adios2-build/lib/python3.11/site-packages/:$PYTHONPATH
