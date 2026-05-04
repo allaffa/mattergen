@@ -14,7 +14,3 @@ defaults:
   - model_module/diffusion_module: csp
   - model_module/diffusion_module/model: mattergen
   - model_module/diffusion_module/corruption: csp
-  - model_module@lightning_module: default
-  - model_module/diffusion_module@lightning_module.diffusion_module: csp
-  - model_module/diffusion_module/model@lightning_module.diffusion_module.model: mattergen
-  - model_module/diffusion_module/corruption@lightning_module.diffusion_module.corruption: csp

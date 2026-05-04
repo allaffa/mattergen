@@ -4,8 +4,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from hydra.core.hydra_config import HydraConfig
-
 
 @dataclass
 class Config:
@@ -28,11 +26,8 @@ class Config:
     # Training backend.
     trainer_backend: str = "native_ddp"
 
-    # Canonical model module config namespace.
+    # Model module config namespace.
     model_module: dict[str, Any] = field(default_factory=dict)
-
-    # Backward-compatible alias for older configs.
-    lightning_module: dict[str, Any] = field(default_factory=dict)
 
     # Trainer settings consumed by native DDP training.
     trainer: dict[str, Any] = field(default_factory=dict)
@@ -54,35 +49,13 @@ def _cfg_get(cfg: Mapping[str, Any] | Any, key: str) -> Any:
 
 
 def resolve_model_module_cfg(cfg: Mapping[str, Any] | Any) -> Any:
+    """Return the canonical ``model_module`` config block.
+
+    Raises ``ValueError`` if it is missing or empty.
+    """
     model_module_cfg = _cfg_get(cfg, "model_module")
-    legacy_cfg = _cfg_get(cfg, "lightning_module")
-
-    has_model_module_cfg = model_module_cfg is not None and bool(model_module_cfg)
-    has_legacy_cfg = legacy_cfg is not None and bool(legacy_cfg)
-
-    if not has_model_module_cfg and not has_legacy_cfg:
+    if not model_module_cfg:
         raise ValueError(
-            "Missing model module config. Expected `model_module` (or legacy `lightning_module`)."
+            "Missing model module config: expected a non-empty `model_module` block."
         )
-    if not has_model_module_cfg:
-        return legacy_cfg
-    if not has_legacy_cfg:
-        return model_module_cfg
-
-    prefer_legacy = False
-    prefer_model = False
-    try:
-        overrides = HydraConfig.get().overrides.task
-    except Exception:
-        overrides = []
-
-    for override in overrides:
-        normalized = override.lstrip("+~")
-        if normalized.startswith("lightning_module."):
-            prefer_legacy = True
-        elif normalized.startswith("model_module."):
-            prefer_model = True
-
-    if prefer_legacy and not prefer_model:
-        return legacy_cfg
     return model_module_cfg

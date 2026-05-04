@@ -4,8 +4,6 @@ hydra:
 
 trainer_backend: native_ddp
 
-lightning_module: ${model_module}
-
 defaults:
   - data_module: mp_20
   - trainer: default

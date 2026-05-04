@@ -89,8 +89,8 @@ data_module:
       _target_: mattergen.common.data.transform.symmetrize_lattice
     - _partial_: true
       _target_: mattergen.common.data.transform.set_chemical_system_string
-lightning_module:
-  _target_: mattergen.diffusion.lightning_module.DiffusionLightningModule
+model_module:
+  _target_: mattergen.diffusion.model_module.DiffusionModelModule
   diffusion_module:
     _target_: mattergen.diffusion.diffusion_module.DiffusionModule
     corruption:

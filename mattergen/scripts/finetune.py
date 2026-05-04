@@ -140,7 +140,6 @@ def mattergen_finetune(cfg: omegaconf.DictConfig):
     # replace denoiser config with adapter config.
     with open_dict(cfg):
         cfg.model_module = updated_model_module_cfg
-        cfg.lightning_module = updated_model_module_cfg
 
     config_as_dict = OmegaConf.to_container(cfg, resolve=True)
     print(json.dumps(config_as_dict, indent=4))

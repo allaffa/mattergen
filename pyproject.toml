@@ -84,6 +84,11 @@ mattergen-train = "mattergen.scripts.run:mattergen_main"
 mattergen-finetune = "mattergen.scripts.finetune:mattergen_finetune"
 mattergen-evaluate = "mattergen.scripts.evaluate:_main"
 csv-to-dataset = "mattergen.scripts.csv_to_dataset:main"
+mattergen-preprocess-dataset = "mattergen.scripts.preprocess_dataset:main"
+
+[project.optional-dependencies]
+adios = ["adios2>=2.10"]
+mpi = ["mpi4py>=3.1"]
 
 
 [tool.setuptools.packages.find]
