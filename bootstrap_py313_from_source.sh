@@ -109,8 +109,8 @@ for dep in deps:
     filtered.append(dep)
 
 if filtered:
-  venv_path = os.environ["BOOTSTRAP_VENV_PATH"]
-  cmd = [str(Path(venv_path) / "bin" / "python"), "-m", "pip", "install", *filtered]
+    venv_path = os.environ["BOOTSTRAP_VENV_PATH"]
+    cmd = [str(Path(venv_path) / "bin" / "python"), "-m", "pip", "install", *filtered]
     subprocess.check_call(cmd)
 PY
 
