@@ -9,11 +9,11 @@ from typing import Any
 import torch
 import torch.distributed as dist
 from omegaconf import DictConfig
-from torch.nn.parallel import DistributedDataParallel
 import yaml
 
 from mattergen.common.data.dataloader import build_split_dataloader
 from mattergen.common.data.property_scalers import compute_property_scalers
+from mattergen.common.utils import distributed as ddp_utils
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
 from mattergen.diffusion.training_components import (
@@ -26,21 +26,8 @@ from mattergen.diffusion.training_components import (
 logger = logging.getLogger(__name__)
 
 
-def _is_distributed_env() -> bool:
-    return int(os.environ.get("WORLD_SIZE", "1")) > 1
-
-
 def _is_rank_zero(rank: int) -> bool:
     return rank == 0
-
-
-def _resolve_device(local_rank: int | None) -> torch.device:
-    if torch.cuda.is_available():
-        if local_rank is not None:
-            torch.cuda.set_device(local_rank)
-            return torch.device("cuda", local_rank)
-        return torch.device("cuda")
-    return torch.device("cpu")
 
 
 def _to_device(batch: Any, device: torch.device):
@@ -251,17 +238,18 @@ def fit(
     optimizer_partial: OptimizerPartial | None,
     scheduler_partials: list[dict[str, Any]] | list[dict[str, SchedulerPartial]] | None,
 ) -> None:
-    distributed = _is_distributed_env()
-    rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ["LOCAL_RANK"]) if "LOCAL_RANK" in os.environ else None
+    # Bring up the process group with scheduler-aware env discovery. Honour
+    # the legacy `native_trainer.distributed_backend` setting (use "auto" or
+    # leave unset to let the helper pick the best backend for this host).
+    backend_pref = native_cfg.get("distributed_backend", "auto") if native_cfg is not None else "auto"
+    world_size, rank = ddp_utils.setup_ddp(backend=backend_pref)
+    distributed = world_size > 1
+    local_rank = ddp_utils.get_local_rank() if distributed else None
 
-    if distributed and not dist.is_initialized():
-        backend = native_cfg.get("distributed_backend", "nccl")
-        if backend == "nccl" and not torch.cuda.is_available():
-            backend = "gloo"
-        dist.init_process_group(backend=backend, init_method="env://")
+    if rank == 0:
+        logger.info("DDP setup: %s", ddp_utils.hostname_port_summary())
 
-    device = _resolve_device(local_rank)
+    device = ddp_utils.resolve_device(local_rank)
     diffusion_module = diffusion_module.to(device)
     model = diffusion_module
 
@@ -273,12 +261,14 @@ def fit(
                 property_embeddings=model.model.property_embeddings_adapt,
             )
 
-    if distributed:
-        model = DistributedDataParallel(
-            model,
-            device_ids=[device.index] if device.type == "cuda" else None,
-            find_unused_parameters=native_cfg.get("find_unused_parameters", True),
-        )
+    model = ddp_utils.wrap_ddp(
+        model,
+        device,
+        find_unused_parameters=bool(native_cfg.get("find_unused_parameters", True)),
+        sync_batch_norm=bool(native_cfg.get("sync_batch_norm", False)),
+        static_graph=bool(native_cfg.get("static_graph", False)),
+        gradient_as_bucket_view=bool(native_cfg.get("gradient_as_bucket_view", True)),
+    )
 
     optimizer, scheduler_cfgs = _parse_optimizers(
         build_optimizers_and_schedulers(
@@ -445,9 +435,7 @@ def fit(
         if distributed:
             dist.barrier()
 
-    if distributed and dist.is_initialized():
-        dist.barrier()
-        dist.destroy_process_group()
+    ddp_utils.cleanup()
 
     if wandb_run is not None:
         wandb_run.finish()
