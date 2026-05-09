@@ -87,6 +87,18 @@ class DiffusionModelModule(torch.nn.Module, Generic[T]):
     def scheduler_partials(self) -> Sequence[Dict[str, Union[Any, SchedulerPartial]]]:
         return self._scheduler_partials
 
+    @property
+    def device(self) -> torch.device:
+        """Return the device hosting this module's parameters.
+
+        PyTorch Lightning exposed ``.device`` on the previous wrapper. Keep the
+        same interface for sampling code while using a plain ``torch.nn.Module``.
+        """
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
+
     @classmethod
     def load_from_checkpoint(
         cls,
