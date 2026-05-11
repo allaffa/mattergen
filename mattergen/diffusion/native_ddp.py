@@ -71,7 +71,9 @@ def _step_schedulers(
             continue
 
         monitor_key = scheduler_cfg.get("monitor")
-        if monitor_key is not None and val_loss is not None:
+        if monitor_key is not None:
+            if val_loss is None:
+                continue
             scheduler.step(val_loss)
         else:
             scheduler.step()
