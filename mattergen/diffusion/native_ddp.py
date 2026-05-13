@@ -16,10 +16,8 @@ from mattergen.common.data.property_scalers import compute_property_scalers
 from mattergen.common.utils import distributed as ddp_utils
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
+from mattergen.diffusion.model_module import DiffusionModelModule
 from mattergen.diffusion.training_components import (
-    OptimizerPartial,
-    SchedulerPartial,
-    build_optimizers_and_schedulers,
     calc_loss,
 )
 
@@ -151,12 +149,12 @@ def _format_checkpoint_name(pattern: str, epoch: int, metric_name: str, metric_v
 
 def _load_checkpoint(
     ckpt_path: str,
-    diffusion_module: DiffusionModule[BatchedData],
+    model_module: DiffusionModelModule[BatchedData],
     optimizer: torch.optim.Optimizer,
     scheduler_cfgs: list[dict[str, Any]],
 ) -> tuple[int, float | None]:
     checkpoint = torch.load(ckpt_path, map_location="cpu")
-    diffusion_module.load_state_dict(checkpoint["state_dict"], strict=True)
+    model_module.load_state_dict(checkpoint["state_dict"], strict=True)
 
     optimizer_states = checkpoint.get("optimizer_states", [])
     if optimizer_states:
@@ -231,14 +229,12 @@ def _save_checkpoint(
 
 def fit(
     *,
-    diffusion_module: DiffusionModule[BatchedData],
+    model_module: DiffusionModelModule[BatchedData],
     datamodule: Any,
     trainer_cfg: DictConfig,
     native_cfg: DictConfig,
     config_dict: dict[str, Any],
     ckpt_path: str | None,
-    optimizer_partial: OptimizerPartial | None,
-    scheduler_partials: list[dict[str, Any]] | list[dict[str, SchedulerPartial]] | None,
 ) -> None:
     # Bring up the process group with scheduler-aware env discovery. Honour
     # the legacy `native_trainer.distributed_backend` setting (use "auto" or
@@ -252,7 +248,8 @@ def fit(
         logger.info("DDP setup: %s", ddp_utils.hostname_port_summary())
 
     device = ddp_utils.resolve_device(local_rank)
-    diffusion_module = diffusion_module.to(device)
+    model_module = model_module.to(device)
+    diffusion_module = model_module.diffusion_module
     model = diffusion_module
 
     if native_cfg.get("set_property_scalers", True):
@@ -272,13 +269,7 @@ def fit(
         gradient_as_bucket_view=bool(native_cfg.get("gradient_as_bucket_view", True)),
     )
 
-    optimizer, scheduler_cfgs = _parse_optimizers(
-        build_optimizers_and_schedulers(
-            diffusion_module=diffusion_module,
-            optimizer_partial=optimizer_partial,
-            scheduler_partials=scheduler_partials,
-        )
-    )
+    optimizer, scheduler_cfgs = _parse_optimizers(model_module.configure_optimizers())
 
     train_loader, train_sampler = build_split_dataloader(
         datamodule,
@@ -328,7 +319,7 @@ def fit(
     if ckpt_path is not None:
         start_epoch, loaded_best = _load_checkpoint(
             ckpt_path,
-            diffusion_module=diffusion_module,
+            model_module=model_module,
             optimizer=optimizer,
             scheduler_cfgs=scheduler_cfgs,
         )
@@ -423,7 +414,7 @@ def fit(
             if should_checkpoint:
                 _save_checkpoint(
                     output_dir=output_dir,
-                    model=model.module if distributed else model,
+                    model=model_module,
                     optimizer=optimizer,
                     epoch=epoch,
                     val_loss=val_loss,

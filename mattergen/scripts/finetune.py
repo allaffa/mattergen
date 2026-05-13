@@ -145,14 +145,12 @@ def mattergen_finetune(cfg: omegaconf.DictConfig):
     print(json.dumps(config_as_dict, indent=4))
 
     native_fit(
-        diffusion_module=model_module.diffusion_module,
+        model_module=model_module,
         datamodule=datamodule,
         trainer_cfg=cfg.trainer,
         native_cfg=cfg.native_trainer,
         config_dict=config_as_dict,
         ckpt_path=None,
-        optimizer_partial=model_module.optimizer_partial,
-        scheduler_partials=list(model_module.scheduler_partials),
     )
 
 

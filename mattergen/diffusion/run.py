@@ -17,8 +17,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from mattergen.common.utils.config_utils import get_config
 from mattergen.diffusion.config import Config, resolve_model_module_cfg
-from mattergen.diffusion.diffusion_module import DiffusionModule
 from mattergen.diffusion.exceptions import AmbiguousConfig
+from mattergen.diffusion.model_module import DiffusionModelModule
 from mattergen.diffusion.native_ddp import fit as native_fit
 
 T = TypeVar("T")
@@ -103,29 +103,18 @@ def main(
         ckpt_path = _find_latest_checkpoint(str(Path(os.getcwd()) / "checkpoints"))
 
     model_module_cfg = resolve_model_module_cfg(config)
-    diffusion_module: DiffusionModule = instantiate(model_module_cfg.diffusion_module)
-    optimizer_partial = maybe_instantiate(model_module_cfg.get("optimizer_partial"))
-    scheduler_partials_cfg = model_module_cfg.get("scheduler_partials", [])
-    scheduler_partials = [
-        {
-            **scheduler_dict,
-            "scheduler": maybe_instantiate(scheduler_dict["scheduler"]),
-        }
-        for scheduler_dict in scheduler_partials_cfg
-    ]
+    model_module: DiffusionModelModule = instantiate(model_module_cfg)
 
     native_fit(
-        diffusion_module=diffusion_module,
+        model_module=model_module,
         datamodule=datamodule,
         trainer_cfg=config.trainer,
         native_cfg=config.native_trainer,
         config_dict=config_as_dict,
         ckpt_path=ckpt_path,
-        optimizer_partial=optimizer_partial,
-        scheduler_partials=scheduler_partials,
     )
 
-    return None, diffusion_module
+    return None, model_module.diffusion_module
 
 
 def cli(argv: list[str] | None) -> None:
