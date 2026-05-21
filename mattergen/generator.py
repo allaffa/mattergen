@@ -102,17 +102,20 @@ def draw_samples_from_sampler(
         all_samples["num_atoms"].reshape(-1),
     )
 
-
+    # if its a single device need to save appropriately
+    subdir = rank
+    if subdir is None:
+        subdir=0
     if output_path is not None:
-        os.makedirs(Path(os.path.join(output_path,'%i' %rank)),exist_ok=True)
+        os.makedirs(Path(os.path.join(output_path,'%i' %subdir)),exist_ok=True)
         assert cfg is not None
         # Save structures to disk in both a extxyz file and a compressed zip file.
         # do this before uploading to mongo in case there is an authentication error
-        save_structures(Path(os.path.join(output_path,'%i' %rank)), generated_strucs)
+        save_structures(Path(os.path.join(output_path,'%i' %subdir)), generated_strucs)
 
         if record_trajectories:
             dump_trajectories(
-                output_path=Path(os.path.join(output_path,'%i' %rank)),
+                output_path=Path(os.path.join(output_path,'%i' %subdir)),
                 all_trajs_list=all_trajs_list,
             )
 
@@ -433,6 +436,8 @@ class CrystalGenerator:
     
 
         rank = ddp_utils.get_rank() if self.distributed else None
+
+        #logger.info("DDP setup: %s - world size %s", ddp_utils.hostname_port_summary(),world_size)
 
         # Prioritize the runtime provided batch_size, num_batches and target_compositions_dict
         batch_size = batch_size or self.batch_size
