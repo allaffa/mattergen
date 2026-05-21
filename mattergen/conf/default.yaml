@@ -7,7 +7,7 @@ checkpoint_path: /home/3pf/projects/mattergen_jaime/mattergen/outputs/singlerun/
 trainer_backend: native_ddp
 
 defaults:
-  - data_module: RHEA_data
+  - data_module: RSSA_data
   - trainer: default
   - native_trainer: default
   - model_module: default

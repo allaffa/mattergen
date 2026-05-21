@@ -3,6 +3,7 @@
 
 import io
 import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
@@ -15,6 +16,7 @@ from omegaconf import DictConfig, OmegaConf
 from pymatgen.core.structure import Structure
 from pymatgen.io.ase import AseAtomsAdaptor
 from tqdm import tqdm
+import torch.distributed as dist
 
 from mattergen.common.data.chemgraph import ChemGraph
 from mattergen.common.data.collate import collate
@@ -34,7 +36,10 @@ from mattergen.diffusion.config import resolve_model_module_cfg
 from mattergen.diffusion.model_module import DiffusionModelModule
 from mattergen.diffusion.sampling.pc_sampler import PredictorCorrector
 from mattergen.common.utils.data_classes import ProgressCallback
+from mattergen.common.utils import distributed as ddp_utils
 
+
+logger = logging.getLogger(__name__)
 
 def draw_samples_from_sampler(
     sampler: PredictorCorrector,
@@ -44,7 +49,10 @@ def draw_samples_from_sampler(
     cfg: DictConfig | None = None,
     record_trajectories: bool = True,
     progress_callback: ProgressCallback | None = None,
+    rank: int | None = None,
 ) -> list[Structure]:
+    
+
 
     # Dict
     properties_to_condition_on = properties_to_condition_on or {}
@@ -57,6 +65,9 @@ def draw_samples_from_sampler(
     for batch_idx, (conditioning_data, mask) in enumerate(tqdm(condition_loader, desc="Generating samples")):
         if progress_callback is not None:
             progress_callback(progress=batch_idx / len(condition_loader))
+
+        conditioning_data = conditioning_data.to(sampler._device)
+        mask = mask.to(sampler._device) if mask else None
 
         # generate samples
         if record_trajectories:
@@ -75,6 +86,14 @@ def draw_samples_from_sampler(
     lengths, angles = lattice_matrix_to_params_torch(all_samples.cell)
     all_samples = all_samples.replace(lengths=lengths, angles=angles)
 
+
+    # if local_rank:
+    #     dist.barrier()
+    #     all_samples['pos'] = gather_for_distributed(all_samples['pos'],
+    #                                                 device,
+    #                                                 world_size,
+    #                                                 rank)
+
     generated_strucs = structure_from_model_output(
         all_samples["pos"].reshape(-1, 3),
         all_samples["atomic_numbers"].reshape(-1),
@@ -83,15 +102,17 @@ def draw_samples_from_sampler(
         all_samples["num_atoms"].reshape(-1),
     )
 
+
     if output_path is not None:
+        os.makedirs(Path(os.path.join(output_path,'%i' %rank)),exist_ok=True)
         assert cfg is not None
         # Save structures to disk in both a extxyz file and a compressed zip file.
         # do this before uploading to mongo in case there is an authentication error
-        save_structures(output_path, generated_strucs)
+        save_structures(Path(os.path.join(output_path,'%i' %rank)), generated_strucs)
 
         if record_trajectories:
             dump_trajectories(
-                output_path=output_path,
+                output_path=Path(os.path.join(output_path,'%i' %rank)),
                 all_trajs_list=all_trajs_list,
             )
 
@@ -138,6 +159,48 @@ def dump_trajectories(
     except ValueError as e:
         print(f"Got error ValueError '{e}' writing the trajectory to disk.")
 
+
+def gather_for_distributed(
+        local_out,
+        device,
+        world_size,
+        rank):
+    
+    # ---- Gather variable-sized outputs to rank 0 on GPU 0 ----
+    local_n = torch.tensor([local_out.size(0)], device=device, dtype=torch.int64)
+    sizes = [torch.empty(1, device=device, dtype=torch.int64) for _ in range(world_size)] if rank == 0 else None
+    dist.gather(local_n, gather_list=sizes, dst=0)
+
+    if rank == 0:
+        sizes = torch.cat(sizes).tolist()
+        max_n = max(sizes)
+        out_dim = local_out.size(1)
+    else:
+        max_n = 0
+        out_dim = local_out.size(1)
+
+    max_n_t = torch.tensor([max_n], device=device, dtype=torch.int64)
+    dist.broadcast(max_n_t, src=0)
+    max_n = int(max_n_t.item())
+
+    # Pad to common shape for gather
+    pad_out = torch.zeros((max_n, out_dim), device=device, dtype=local_out.dtype)
+    pad_out[: local_out.size(0)] = local_out
+
+    if rank == 0:
+        gathered = [torch.empty((max_n, out_dim), device=device, dtype=pad_out.dtype) for _ in range(world_size)]
+    else:
+        gathered = None
+
+    dist.gather(pad_out, gather_list=gathered, dst=0)
+
+    if rank == 0:
+        # Unpad and concatenate (order is rank order)
+        outs = [gathered[r][: sizes[r]] for r in range(world_size)]
+        all_out = torch.cat(outs, dim=0)  # single tensor on rank 0 GPU
+        print(f"[rank0] gathered output tensor shape: {tuple(all_out.shape)} on {all_out.device}")
+
+    return(all_out)
 
 def structure_from_model_output(
     frac_coords, atom_types, lengths, angles, num_atoms
@@ -202,6 +265,12 @@ class CrystalGenerator:
     # Config path, if None will default to DEFAULT_SAMPLING_CONFIG_PATH
     sampling_config_path: Path | None = None
     sampling_config_name: str = "default"
+
+    # distributed 
+    distributed: bool | None = None
+
+    # local rank
+    local_rank: str | None = None
 
     record_trajectories: bool = True  # store all intermediate samples by default
 
@@ -276,12 +345,15 @@ class CrystalGenerator:
         self,
         sampling_config: DictConfig,
         target_compositions_dict: list[dict[str, float]] | None = None,
+        distributed: bool | None = None,
     ) -> ConditionLoader:
         condition_loader_partial = instantiate(sampling_config.condition_loader_partial)
         if not target_compositions_dict:
-            return condition_loader_partial(properties=self.properties_to_condition_on)
+            return condition_loader_partial(properties=self.properties_to_condition_on,
+                                            distributed=distributed)
 
-        return condition_loader_partial(target_compositions_dict=target_compositions_dict)
+        return condition_loader_partial(target_compositions_dict=target_compositions_dict,
+                                        distributed=distributed)
 
     def load_sampling_config(
         self,
@@ -346,7 +418,8 @@ class CrystalGenerator:
         if self._model is not None:
             return
         model = load_model_diffusion(self.checkpoint_info)
-        model = model.to(get_device())
+        device = ddp_utils.resolve_device(self.local_rank)
+        model = model.to(device)
         self._model = model
         self._cfg = self.checkpoint_info.config
 
@@ -357,6 +430,10 @@ class CrystalGenerator:
         target_compositions_dict: list[dict[str, float]] | None = None,
         output_dir: str = "outputs",
     ) -> list[Structure]:
+    
+
+        rank = ddp_utils.get_rank() if self.distributed else None
+
         # Prioritize the runtime provided batch_size, num_batches and target_compositions_dict
         batch_size = batch_size or self.batch_size
         num_batches = num_batches or self.num_batches
@@ -376,10 +453,14 @@ class CrystalGenerator:
 
         print("\nSampling config:")
         print(OmegaConf.to_yaml(sampling_config, resolve=True))
-        condition_loader = self.get_condition_loader(sampling_config, target_compositions_dict)
+        condition_loader = self.get_condition_loader(sampling_config, 
+                                                     target_compositions_dict, 
+                                                     self.distributed)
 
         sampler_partial = instantiate(sampling_config.sampler_partial)
-        sampler = sampler_partial(pl_module=self.model)
+        sampler = sampler_partial(pl_module=self.model,
+                                  distributed=self.distributed)
+
 
         generated_structures = draw_samples_from_sampler(
             sampler=sampler,
@@ -389,6 +470,9 @@ class CrystalGenerator:
             properties_to_condition_on=self.properties_to_condition_on,
             record_trajectories=self.record_trajectories,
             progress_callback=self.progress_callback,
+            rank=rank
         )
+
+
 
         return generated_structures
