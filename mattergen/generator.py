@@ -6,6 +6,7 @@ import os
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 from zipfile import ZipFile
 
 import ase.io
@@ -40,6 +41,7 @@ from mattergen.common.utils import distributed as ddp_utils
 
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 def draw_samples_from_sampler(
     sampler: PredictorCorrector,
@@ -87,13 +89,6 @@ def draw_samples_from_sampler(
     all_samples = all_samples.replace(lengths=lengths, angles=angles)
 
 
-    # if local_rank:
-    #     dist.barrier()
-    #     all_samples['pos'] = gather_for_distributed(all_samples['pos'],
-    #                                                 device,
-    #                                                 world_size,
-    #                                                 rank)
-
     generated_strucs = structure_from_model_output(
         all_samples["pos"].reshape(-1, 3),
         all_samples["atomic_numbers"].reshape(-1),
@@ -102,20 +97,24 @@ def draw_samples_from_sampler(
         all_samples["num_atoms"].reshape(-1),
     )
 
-    # if its a single device need to save appropriately
-    subdir = rank
-    if subdir is None:
-        subdir=0
+    if rank is not None:
+        generated_strucs = gather_for_distributed(generated_strucs, rank=rank)
+        if record_trajectories:
+            all_trajs_list = gather_for_distributed(all_trajs_list, rank=rank)
+
     if output_path is not None:
-        os.makedirs(Path(os.path.join(output_path,'%i' %subdir)),exist_ok=True)
+        if rank not in (None, 0):
+            return generated_strucs
+
+        os.makedirs(output_path, exist_ok=True)
         assert cfg is not None
         # Save structures to disk in both a extxyz file and a compressed zip file.
         # do this before uploading to mongo in case there is an authentication error
-        save_structures(Path(os.path.join(output_path,'%i' %subdir)), generated_strucs)
+        save_structures(output_path, generated_strucs)
 
         if record_trajectories:
             dump_trajectories(
-                output_path=Path(os.path.join(output_path,'%i' %subdir)),
+                output_path=output_path,
                 all_trajs_list=all_trajs_list,
             )
 
@@ -164,46 +163,20 @@ def dump_trajectories(
 
 
 def gather_for_distributed(
-        local_out,
-        device,
-        world_size,
-        rank):
-    
-    # ---- Gather variable-sized outputs to rank 0 on GPU 0 ----
-    local_n = torch.tensor([local_out.size(0)], device=device, dtype=torch.int64)
-    sizes = [torch.empty(1, device=device, dtype=torch.int64) for _ in range(world_size)] if rank == 0 else None
-    dist.gather(local_n, gather_list=sizes, dst=0)
+    local_out: list[T],
+    rank: int,
+) -> list[T]:
+    """Gather per-rank generated objects to rank 0 in rank order."""
+    world_size = ddp_utils.get_world_size()
+    gathered: list[list[T] | None] | None = [None for _ in range(world_size)] if rank == 0 else None
+    dist.gather_object(local_out, object_gather_list=gathered, dst=0)
 
-    if rank == 0:
-        sizes = torch.cat(sizes).tolist()
-        max_n = max(sizes)
-        out_dim = local_out.size(1)
-    else:
-        max_n = 0
-        out_dim = local_out.size(1)
+    if rank != 0:
+        return []
 
-    max_n_t = torch.tensor([max_n], device=device, dtype=torch.int64)
-    dist.broadcast(max_n_t, src=0)
-    max_n = int(max_n_t.item())
-
-    # Pad to common shape for gather
-    pad_out = torch.zeros((max_n, out_dim), device=device, dtype=local_out.dtype)
-    pad_out[: local_out.size(0)] = local_out
-
-    if rank == 0:
-        gathered = [torch.empty((max_n, out_dim), device=device, dtype=pad_out.dtype) for _ in range(world_size)]
-    else:
-        gathered = None
-
-    dist.gather(pad_out, gather_list=gathered, dst=0)
-
-    if rank == 0:
-        # Unpad and concatenate (order is rank order)
-        outs = [gathered[r][: sizes[r]] for r in range(world_size)]
-        all_out = torch.cat(outs, dim=0)  # single tensor on rank 0 GPU
-        print(f"[rank0] gathered output tensor shape: {tuple(all_out.shape)} on {all_out.device}")
-
-    return(all_out)
+    assert gathered is not None
+    assert all(rank_out is not None for rank_out in gathered)
+    return [item for rank_out in gathered for item in rank_out]
 
 def structure_from_model_output(
     frac_coords, atom_types, lengths, angles, num_atoms

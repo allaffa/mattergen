@@ -62,9 +62,6 @@ def main(
         pretrained_name is None or model_path is None
     ), "Only one of pretrained_name or model_path can be provided."
 
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-
     #ddp stuff
     #backend_pref = native_cfg.get("distributed_backend", "auto") if native_cfg is not None else "auto"
     backend_pref = "auto"
@@ -74,6 +71,7 @@ def main(
 
     if rank == 0:
         logger.info("DDP setup: %s - world size %s", ddp_utils.hostname_port_summary(),world_size)
+        if not os.path.exists(output_path): os.makedirs(output_path)
 
     sampling_config_overrides = sampling_config_overrides or []
     config_overrides = config_overrides or []
