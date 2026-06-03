@@ -5,7 +5,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
-from typing import Iterable, Protocol, Sequence, Type, TypeVar
+from typing import Any, Iterable, Protocol, Sequence, Type, TypeVar
 
 import numpy as np
 import numpy.typing
@@ -17,19 +17,19 @@ from pymatgen.symmetry.groups import SpaceGroup
 from torch.utils.data import Dataset
 from tqdm.auto import tqdm
 
+from mattergen.common.data.backends import (
+    CacheBundle,
+    PickleFormat,
+    SUPPORTED_FORMATS,
+    list_available_properties as _backend_list_properties,
+    read_cache,
+    write_cache,
+)
 from mattergen.common.data.chemgraph import ChemGraph
 from mattergen.common.data.transform import Transform
-from mattergen.common.data.types import PropertySourceId, PropertyValues
+from mattergen.common.data.types import PropertySourceId
 from mattergen.common.globals import PROJECT_ROOT
 from mattergen.common.utils.globals import PROPERTY_SOURCE_IDS
-
-CORE_STRUCTURE_FILE_NAMES = {
-    "pos": "pos.npy",
-    "cell": "cell.npy",
-    "atomic_numbers": "atomic_numbers.npy",
-    "num_atoms": "num_atoms.npy",
-    "structure_id": "structure_id.npy",
-}
 
 T = TypeVar("T", bound="BaseDataset")
 
@@ -96,6 +96,7 @@ class BaseDataset(Dataset):
         transforms: list[Transform] | None = None,
         properties: list[PropertySourceId] | None = None,
         dataset_transforms: list[DatasetTransform] | None = None,
+        comm: Any = None,
     ) -> T:
         """
         Load a dataset from a specified cache path.
@@ -105,6 +106,10 @@ class BaseDataset(Dataset):
             transforms: List of transforms to apply to **each datapoint** when loading, e.g., to make the lattice matrices symmetric.
             properties: List of properties to condition on.
             dataset_transforms: List of transforms to apply to the **whole dataset**, e.g., to filter out certain entries.
+            comm: Optional MPI communicator. When supplied (and its size is
+                > 1), only rank 0 reads from disk and the resulting bundle
+                is broadcast to every rank, mirroring HydraGNN's collective
+                IO policy.
 
         Returns:
             The dataset.
@@ -113,6 +118,7 @@ class BaseDataset(Dataset):
             cache_path=cache_path,
             transforms=transforms,
             properties=properties,
+            comm=comm,
         ).build(cls, dataset_transforms=dataset_transforms)
 
     def subset(self, indices: Sequence[int]) -> "BaseDataset":
@@ -394,53 +400,61 @@ class CrystalDatasetBuilder:
         cache_path: str,
         transforms: list[Transform] | None = None,
         properties: list[PropertySourceId] | None = None,
+        comm: Any = None,
     ):
         self.cache_path = cache_path
         self.transforms = transforms
         self.property_names = properties or []
+        self._comm = comm
         assert all([s in PROPERTY_SOURCE_IDS for s in self.property_names]), (
             f"Property names {self.property_names} are not valid. "
             f"Valid property source names: {PROPERTY_SOURCE_IDS}"
         )
 
-    def _load_file(self, filename: str) -> numpy.typing.NDArray:
-        return np.load(f"{self.cache_path}/{filename}")
-
     @cached_property
-    def pos(self):
-        return self._load_file(CORE_STRUCTURE_FILE_NAMES["pos"])
+    def _bundle(self) -> CacheBundle:
+        return read_cache(
+            self.cache_path,
+            properties=self.property_names or None,
+            comm=self._comm,
+        )
 
-    @cached_property
-    def cell(self):
-        return self._load_file(CORE_STRUCTURE_FILE_NAMES["cell"])
+    @property
+    def pos(self) -> numpy.typing.NDArray:
+        return self._bundle.pos
 
-    @cached_property
-    def atomic_numbers(self):
-        return self._load_file(CORE_STRUCTURE_FILE_NAMES["atomic_numbers"])
+    @property
+    def cell(self) -> numpy.typing.NDArray:
+        return self._bundle.cell
 
-    @cached_property
-    def num_atoms(self):
-        return self._load_file(CORE_STRUCTURE_FILE_NAMES["num_atoms"])
+    @property
+    def atomic_numbers(self) -> numpy.typing.NDArray:
+        return self._bundle.atomic_numbers
 
-    @cached_property
-    def structure_id(self):
-        return self._load_file(CORE_STRUCTURE_FILE_NAMES["structure_id"])
+    @property
+    def num_atoms(self) -> numpy.typing.NDArray:
+        return self._bundle.num_atoms
+
+    @property
+    def structure_id(self) -> numpy.typing.NDArray:
+        return self._bundle.structure_id
 
     @property
     def properties(self) -> dict[PropertySourceId, numpy.typing.NDArray]:
-        properties: dict[PropertySourceId, numpy.typing.NDArray] = {}
-        prop_names = self.property_names
-        for prop_name in prop_names:
-            if not os.path.exists(f"{self.cache_path}/{prop_name}.json"):
+        bundle_props = self._bundle.properties
+        if not self.property_names:
+            return dict(bundle_props)
+        out: dict[PropertySourceId, numpy.typing.NDArray] = {}
+        for prop_name in self.property_names:
+            if prop_name not in bundle_props:
                 raise FileNotFoundError(
-                    f"{prop_name}.json does not exist in {self.cache_path}.\n"
+                    f"Property {prop_name!r} not found in {self.cache_path}.\n"
                     f"Available properties: {self.list_available_properties()}"
                 )
-            properties[prop_name] = PropertyValues.from_json(
-                f"{self.cache_path}/{prop_name}.json"
-            ).values
-            assert len(properties[prop_name]) == len(self.structure_id)
-        return properties
+            arr = bundle_props[prop_name]
+            assert len(arr) == len(self.structure_id)
+            out[prop_name] = arr
+        return out
 
     def build(
         self,
@@ -513,6 +527,7 @@ class CrystalDatasetBuilder:
         cache_path: str,
         transforms: list[Transform] | None = None,
         properties: list[PropertySourceId] | None = None,
+        comm: Any = None,
     ) -> "CrystalDatasetBuilder":
         """
         Create a CrystalDatasetBuilder from a path that contains cache for the dataset.
@@ -522,10 +537,27 @@ class CrystalDatasetBuilder:
             cache_path=cache_path,
             transforms=transforms,
             properties=properties,
+            comm=comm,
         )
 
     @classmethod
-    def from_csv(cls, csv_path: str, cache_path: str, transforms: list[Transform] | None = None):
+    def from_csv(
+        cls,
+        csv_path: str,
+        cache_path: str,
+        transforms: list[Transform] | None = None,
+        fmt: str = PickleFormat,
+    ):
+        """Build a cache from a MatterGen CSV file.
+
+        ``fmt`` selects the on-disk backend; defaults to pickle. Use
+        ``adios`` to write an ADIOS2 ``.bp`` cache (requires the optional
+        ``adios2`` package).
+        """
+        if fmt not in SUPPORTED_FORMATS:
+            raise ValueError(
+                f"Unknown cache format {fmt!r}; expected one of {SUPPORTED_FORMATS}."
+            )
         df = pd.read_csv(csv_path)
 
         structures = [
@@ -540,14 +572,16 @@ class CrystalDatasetBuilder:
         structure_infos, properties = structures_to_numpy(structures)
 
         os.makedirs(cache_path, exist_ok=True)
-        print(f"Storing cached dataset in {cache_path}.")
-        for k, filename in CORE_STRUCTURE_FILE_NAMES.items():
-            np.save(f"{cache_path}/{filename}", structure_infos[k])
-        for prop in properties:
-            PropertyValues(
-                values=properties[prop],
-                property_source_doc_id=prop,
-            ).to_json(f"{cache_path}/{prop}.json")
+        print(f"Storing cached dataset in {cache_path} ({fmt}).")
+        bundle = CacheBundle(
+            pos=structure_infos["pos"],
+            cell=structure_infos["cell"],
+            atomic_numbers=structure_infos["atomic_numbers"],
+            num_atoms=structure_infos["num_atoms"],
+            structure_id=structure_infos["structure_id"],
+            properties=dict(properties),
+        )
+        write_cache(cache_path, bundle, fmt=fmt)
 
         return cls(
             cache_path=cache_path,
@@ -556,39 +590,38 @@ class CrystalDatasetBuilder:
         )
 
     def list_available_properties(self) -> list[PropertySourceId]:
-        """
-        List the properties that are available in the cache.
-        """
-        return [
-            prop.split(".json")[0] for prop in os.listdir(self.cache_path) if prop.endswith(".json")
-        ]
+        """List the properties that are available in the cache."""
+        return _backend_list_properties(self.cache_path)
 
     def add_property_to_cache(
         self,
         property_name: PropertySourceId,
         data: dict[str, numpy.typing.NDArray],
     ):
-        """
-        Add a new property to the cache. The property will be stored in the blob storage and added
-        to the properties of the dataset.
+        """Add a new property to the cache.
 
-        The data should be a dictionary with the structure id as keys and the property values as
-        values. The properties can be sparse, i.e. some structures can be missing the property.
-        These properties will be set to NaN in the dataset.
+        ``data`` maps ``structure_id`` to property value. Missing entries are
+        stored as NaN. The cache file is rewritten in place using the same
+        backend that produced it.
         """
-        assert (
-            property_name not in self.property_names
-        ), f"Property {property_name} already exists in properties"
+        if property_name in self.list_available_properties():
+            raise AssertionError(
+                f"Property {property_name} already exists in properties"
+            )
+        bundle = read_cache(self.cache_path, properties=None)
         property_values_linearized = np.array(
-            [data.get(structure_id, np.nan) for structure_id in self.structure_id]
+            [data.get(structure_id, np.nan) for structure_id in bundle.structure_id]
         )
-        property_values = PropertyValues(
-            values=property_values_linearized,
-            property_source_doc_id=property_name,
-        )
-        assert property_values.n_entries == len(self.structure_id), (
-            f"Property {property_name} has {property_values.n_entries} entries, "
-            f"but the dataset has {len(self.structure_id)} structures."
-        )
-        property_values.to_json(self.cache_path + "/" + f"{property_name}.json")
-        self.property_names.append(property_name)
+        if len(property_values_linearized) != len(bundle.structure_id):
+            raise AssertionError(
+                f"Property {property_name} has {len(property_values_linearized)} entries, "
+                f"but the dataset has {len(bundle.structure_id)} structures."
+            )
+        bundle.properties[property_name] = property_values_linearized
+        from mattergen.common.data.backends import detect_format
+
+        write_cache(self.cache_path, bundle, fmt=detect_format(self.cache_path))
+        # Invalidate cached bundle so the new property is picked up.
+        self.__dict__.pop("_bundle", None)
+        if property_name not in self.property_names:
+            self.property_names.append(property_name)

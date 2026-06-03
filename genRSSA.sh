@@ -1,18 +1,17 @@
 #!/bin/bash
 #SBATCH -A LRN070
-#SBATCH -J HydraGNN
-#SBATCH -o mattergen-%j.out
-#SBATCH -e mattergen-%j.out
-#SBATCH -t 00:30:00
+#SBATCH -J generateRHEA
+#SBATCH -o ../jobOutputs/gen/mattergen_rhea_gen-%j.out
+#SBATCH -e ../jobOutputs/gen/mattergen_rhea_gen-%j.out
+#SBATCH -t 01:00:00
 #SBATCH -p batch 
 ##SBATCH -q debug
-#SBATCH -N 2 # 128  
+#SBATCH -N 32
 ##SBATCH -S 1
 
  
-
-CASE_ROOT=/lustre/orion/lrn070/proj-shared/zhangp/mattergen
-source $CASE_ROOT/installation_scripts/module-to-load-frontier-rocm720.sh
+CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/patxi/mattergen
+source $CASE_ROOT/module-to-load-frontier-rocm720.sh
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 export PYTHONPATH=/lustre/orion/lrn070/world-shared/mlupopa/HydraGNN-Installation-Frontier/ADIOS2-Frontier/adios2-build/lib/python3.11/site-packages/:$PYTHONPATH
@@ -70,16 +69,23 @@ env | grep ^MI
 env | grep ^MPICH
 env | grep ^HYDRA
 
-#mattergen-generate ./results/ --model_path ./checkpoints/mattergen_base --batch_size 16 --num_batches 1 --sampling_config_path ./sampling_conf 
-
-####data preparation####
-#git lfs pull -I data-release/mp-20/ --exclude=""
-#unzip data-release/mp-20/mp_20.zip -d datasets
-#csv-to-dataset --csv-folder datasets/mp_20/ --dataset-name mp_20 --cache-folder datasets/cache
-
-#srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
-
-srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
+# this is the path to the best "scratch" checkpoint from training on legacy mattergen
+export MODEL_PATH=/lustre/orion/lrn070/proj-shared/patxi/patxi/checkpoints/scratch/2026-04-19/01-20-12
+export RESULTS_PATH=/lustre/orion/lrn070/proj-shared/patxi/patxi/results/rhea_scratch_weighted  # Samples will be written to this directory
+mkdir -p $RESULTS_PATH
+#srun --ntasks-per-node=8 mattergen-generate $RESULTS_PATH --model_path=$MODEL_PATH  --batch_size=8 --num_batches=1 --sampling_config_overrides='["++condition_loader_partial.num_atoms_distribution=RHEA_DATA"]'
+srun --ntasks-per-node=8 mattergen-generate $RESULTS_PATH --model_path=$MODEL_PATH  --batch_size=1024 --num_batches=1 --num_atoms_distribution="RSSA"
 
 
 
+# unzip ${RESULTS_PATH}/generated_trajectories.zip -d ${RESULTS_PATH}
+# python visualizeGen.py $RESULTS_PATH 15 10
+
+
+# export MODEL_PATH=/lustre/orion/lrn070/proj-shared/patxi/mattergen/outputs/singlerun/2026-03-18/11-10-24
+# export RESULTS_PATH=results/rhea_fineTune
+# mkdir -p $RESULTS_PATH
+# srun --ntasks-per-node=8 mattergen-generate $RESULTS_PATH --model_path=$MODEL_PATH  --batch_size=16 --num_batches=1
+
+# unzip ${RESULTS_PATH}/generated_trajectories.zip -d ${RESULTS_PATH}
+# python visualizeGen.py $RESULTS_PATH 15 10

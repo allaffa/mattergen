@@ -7,12 +7,15 @@ from typing import Generic, Mapping, Tuple, TypeVar
 
 import torch
 from tqdm.auto import tqdm
+import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from mattergen.diffusion.corruption.multi_corruption import MultiCorruption, apply
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
-from mattergen.diffusion.lightning_module import DiffusionLightningModule
+from mattergen.diffusion.model_module import DiffusionModelModule
 from mattergen.diffusion.sampling.pc_partials import CorrectorPartial, PredictorPartial
+from mattergen.common.utils import distributed as ddp_utils
 
 Diffusable = TypeVar(
     "Diffusable", bound=BatchedData
@@ -36,6 +39,7 @@ class PredictorCorrector(Generic[Diffusable]):
         N: int,
         eps_t: float = 1e-3,
         max_t: float | None = None,
+        distributed: bool | None = None,
     ):
         """
         Args:
@@ -47,8 +51,21 @@ class PredictorCorrector(Generic[Diffusable]):
             N: number of noise levels
             eps_t: diffusion time to stop denoising at
             max_t: diffusion time to start denoising at. If None, defaults to the maximum diffusion time. You may want to start at T-0.01, say, for numerical stability.
+            distributed: if it should be wrapped w ddp
         """
-        self._diffusion_module = diffusion_module
+        
+        if distributed:
+            self._diffusion_module = ddp_utils.wrap_ddp(
+                    diffusion_module,
+                    device,
+                    find_unused_parameters=True,
+                    sync_batch_norm=False,
+                    static_graph=False,
+                    gradient_as_bucket_view=True,
+                )
+        else:
+            self._diffusion_module = diffusion_module
+
         self.N = N
 
         if max_t is None:
@@ -84,18 +101,39 @@ class PredictorCorrector(Generic[Diffusable]):
 
     @property
     def diffusion_module(self) -> DiffusionModule:
-        return self._diffusion_module
+        if isinstance(self._diffusion_module,DDP):
+            return self._diffusion_module.module
+        else:
+            return self._diffusion_module
+    
 
     @property
     def _multi_corruption(self) -> MultiCorruption:
-        return self._diffusion_module.corruption
+        if isinstance(self._diffusion_module,DDP):
+            return self._diffusion_module.module.corruption
+        else:
+            return self._diffusion_module.corruption
+        
 
     def _score_fn(self, x: Diffusable, t: torch.Tensor) -> Diffusable:
-        return self._diffusion_module.score_fn(x, t)
+        if isinstance(self._diffusion_module,DDP):
+            return self._diffusion_module.module.score_fn(x, t)
+        else:
+            return self._diffusion_module.score_fn(x, t)
 
     @classmethod
-    def from_pl_module(cls, pl_module: DiffusionLightningModule, **kwargs) -> PredictorCorrector:
-        return cls(diffusion_module=pl_module.diffusion_module, device=pl_module.device, **kwargs)
+    def from_model_module(
+        cls, model_module: DiffusionModelModule, **kwargs
+    ) -> PredictorCorrector:
+        return cls(
+            diffusion_module=model_module.diffusion_module,
+            device=model_module.device,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_pl_module(cls, pl_module: DiffusionModelModule, **kwargs) -> PredictorCorrector:
+        return cls.from_model_module(pl_module, **kwargs)
 
     @torch.no_grad()
     def sample(

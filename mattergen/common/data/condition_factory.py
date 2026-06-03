@@ -6,7 +6,9 @@ from typing import Callable, Iterable, Sequence
 
 import torch
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
+from mattergen.common.data.dataloader import worker_init_fn
 from mattergen.common.data.chemgraph import ChemGraph
 from mattergen.common.data.collate import collate
 from mattergen.common.data.dataset import NumAtomsCrystalDataset
@@ -33,6 +35,7 @@ def get_number_of_atoms_condition_loader(
     shuffle: bool = True,
     transforms: list[Transform] | None = None,
     properties: TargetProperty | None = None,
+    distributed: bool | None = None,
 ) -> ConditionLoader:
     transforms = transforms or []
     if properties is not None:
@@ -46,11 +49,20 @@ def get_number_of_atoms_condition_loader(
         num_samples=num_samples,
         transforms=transforms,
     )
+
+    sampler = None
+    dataloader_shuffle = shuffle
+    if distributed:
+        sampler = DistributedSampler(dataset, shuffle=shuffle)
+        dataloader_shuffle = False
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
+        sampler=sampler,
         collate_fn=partial(_collate_fn, collate_fn=collate),
-        shuffle=shuffle,
+        shuffle=dataloader_shuffle,
+        worker_init_fn=worker_init_fn,
     )
 
 

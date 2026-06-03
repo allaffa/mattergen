@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 
 @dataclass
@@ -23,11 +23,52 @@ class Config:
     # directory for a checkpoint from which to resume training.
     auto_resume: bool = False
 
-    # DiffusionLightningModule
-    lightning_module: dict[str, Any] = field(default_factory=dict)
+    # Training backend.
+    trainer_backend: str = "native_ddp"
 
-    # pytorch_lightning.Trainer
+    # Model module config namespace.
+    model_module: dict[str, Any] = field(default_factory=dict)
+
+    # Trainer settings consumed by native DDP training.
     trainer: dict[str, Any] = field(default_factory=dict)
+
+    # Native PyTorch DDP trainer settings.
+    native_trainer: dict[str, Any] = field(default_factory=dict)
 
     # LightningDataModule
     data_module: dict[str, Any] = field(default_factory=dict)
+
+
+def _cfg_get(cfg: Mapping[str, Any] | Any, key: str) -> Any:
+    if isinstance(cfg, Mapping):
+        return cfg.get(key)
+    getter = getattr(cfg, "get", None)
+    if callable(getter):
+        return getter(key)
+    return getattr(cfg, key, None)
+
+
+def resolve_model_module_cfg(cfg: Mapping[str, Any] | Any) -> Any:
+    """Return the canonical ``model_module`` config block.
+
+    Raises ``ValueError`` if it is missing or empty.
+    """
+
+    # loading in from legacy config files can cause some issues
+    # this doesnt cause problems in training bc in training 
+    # it is assumed the user correctly prescribed all the configs
+    # and then model is simply loaded from the legacy checkpoints
+    # for generation the 'model path' needs to be prescribed which
+    # is used to read BOTH the config (containing legacy fields)
+    # and the checkpoints. the below works reasonably well despite being
+    # a little hacky
+
+    if 'lightning_module' in list(cfg.keys()):
+        model_module_cfg = _cfg_get(cfg, "lightning_module")
+    else:
+        model_module_cfg = _cfg_get(cfg, "model_module")
+    if not model_module_cfg:
+        raise ValueError(
+            "Missing model module config: expected a non-empty `model_module` block."
+        )
+    return model_module_cfg

@@ -1,18 +1,17 @@
 #!/bin/bash
 #SBATCH -A LRN070
-#SBATCH -J HydraGNN
-#SBATCH -o mattergen-%j.out
-#SBATCH -e mattergen-%j.out
-#SBATCH -t 00:30:00
+#SBATCH -J mattergen_rhea_train
+#SBATCH -o jobOutputs/mattergen_rhea_train_cell-%j.out
+#SBATCH -e jobOutputs/mattergen_rhea_train_cell-%j.out
+#SBATCH -t 00:10:00
 #SBATCH -p batch 
-##SBATCH -q debug
-#SBATCH -N 2 # 128  
+#SBATCH -q debug
+#SBATCH -N 1
 ##SBATCH -S 1
 
  
-
-CASE_ROOT=/lustre/orion/lrn070/proj-shared/zhangp/mattergen
-source $CASE_ROOT/installation_scripts/module-to-load-frontier-rocm720.sh
+CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/patxi/mattergen
+source $CASE_ROOT/module-to-load-frontier-rocm720.sh
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 export PYTHONPATH=/lustre/orion/lrn070/world-shared/mlupopa/HydraGNN-Installation-Frontier/ADIOS2-Frontier/adios2-build/lib/python3.11/site-packages/:$PYTHONPATH
@@ -51,6 +50,7 @@ export FI_MR_CACHE_MONITOR=disabled
 export TORCH_NCCL_HIGH_PRIORITY=1
 export FI_CXI_RDV_PROTO=alt_read
 
+# this might be weird...
 export PATH_TO_THE_PLUGIN_DIRECTORY=/lustre/orion/lrn070/world-shared/mlupopa/AWI_OFI_RCCL_ROCm631/aws-ofi-rccl/lib
 export LD_LIBRARY_PATH=${PATH_TO_THE_PLUGIN_DIRECTORY}:$LD_LIBRARY_PATH
  
@@ -79,7 +79,7 @@ env | grep ^HYDRA
 
 #srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
 
-srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
+python ckptLRAdjust.py /lustre/orion/lrn070/proj-shared/patxi/patxi/mattergen/mattergen/conf/default.yaml 1e-5
 
-
+srun --ntasks-per-node=8  mattergen-train data_module=RSSA_data ~trainer.logger
 

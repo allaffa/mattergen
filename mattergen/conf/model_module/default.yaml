@@ -1,4 +1,4 @@
-_target_: mattergen.diffusion.lightning_module.DiffusionLightningModule
+_target_: mattergen.diffusion.model_module.DiffusionModelModule
 optimizer_partial:
   lr: 1e-4
   _target_: torch.optim.Adam

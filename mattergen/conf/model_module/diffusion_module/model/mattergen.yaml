@@ -23,7 +23,7 @@ property_embeddings_adapt: {}
 property_embeddings: {}
 defaults: [] # NOTE: to train a conditional model, unccoment entries such as property_embeddings@property_embeddings.chemical_system: chemical_system below and edit/add properties to the defaults list as desired.
   # see https://stackoverflow.com/questions/71356361/selecting-multiple-configs-from-a-config-group-in-hydra-without-using-an-explici
-  # add via config override: +lightning_module/diffusion_module/model/property_embeddings@lightning_module.diffusion_module.model.property_embeddings.dft_bulk_modulus=dft_bulk_modulus
-  # delete via config override: ~lightning_module/diffusion_module/model/property_embeddings@lightning_module.diffusion_module.model.property_embeddings.chemical_system
+  # add via config override: +model_module/diffusion_module/model/property_embeddings@model_module.diffusion_module.model.property_embeddings.dft_bulk_modulus=dft_bulk_modulus
+  # delete via config override: ~model_module/diffusion_module/model/property_embeddings@model_module.diffusion_module.model.property_embeddings.chemical_system
   # - property_embeddings@property_embeddings.chemical_system: chemical_system
   # - property_embeddings@property_embeddings.dft_bulk_modulus: dft_bulk_modulus

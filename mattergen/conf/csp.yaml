@@ -4,11 +4,13 @@ hydra:
 
 
 auto_resume: true
+trainer_backend: native_ddp
 
 defaults:
   - data_module: mp_20
   - trainer: default
-  - lightning_module: default
-  - lightning_module/diffusion_module: csp
-  - lightning_module/diffusion_module/model: mattergen
-  - lightning_module/diffusion_module/corruption: csp
+  - native_trainer: default
+  - model_module: default
+  - model_module/diffusion_module: csp
+  - model_module/diffusion_module/model: mattergen
+  - model_module/diffusion_module/corruption: csp

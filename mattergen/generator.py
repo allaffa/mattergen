@@ -3,8 +3,10 @@
 
 import io
 import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 from zipfile import ZipFile
 
 import ase.io
@@ -15,6 +17,7 @@ from omegaconf import DictConfig, OmegaConf
 from pymatgen.core.structure import Structure
 from pymatgen.io.ase import AseAtomsAdaptor
 from tqdm import tqdm
+import torch.distributed as dist
 
 from mattergen.common.data.chemgraph import ChemGraph
 from mattergen.common.data.collate import collate
@@ -30,10 +33,15 @@ from mattergen.common.utils.eval_utils import (
     save_structures,
 )
 from mattergen.common.utils.globals import DEFAULT_SAMPLING_CONFIG_PATH, get_device
-from mattergen.diffusion.lightning_module import DiffusionLightningModule
+from mattergen.diffusion.config import resolve_model_module_cfg
+from mattergen.diffusion.model_module import DiffusionModelModule
 from mattergen.diffusion.sampling.pc_sampler import PredictorCorrector
 from mattergen.common.utils.data_classes import ProgressCallback
+from mattergen.common.utils import distributed as ddp_utils
 
+
+logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 def draw_samples_from_sampler(
     sampler: PredictorCorrector,
@@ -43,7 +51,10 @@ def draw_samples_from_sampler(
     cfg: DictConfig | None = None,
     record_trajectories: bool = True,
     progress_callback: ProgressCallback | None = None,
+    rank: int | None = None,
 ) -> list[Structure]:
+    
+
 
     # Dict
     properties_to_condition_on = properties_to_condition_on or {}
@@ -56,6 +67,9 @@ def draw_samples_from_sampler(
     for batch_idx, (conditioning_data, mask) in enumerate(tqdm(condition_loader, desc="Generating samples")):
         if progress_callback is not None:
             progress_callback(progress=batch_idx / len(condition_loader))
+
+        conditioning_data = conditioning_data.to(sampler._device)
+        mask = mask.to(sampler._device) if mask else None
 
         # generate samples
         if record_trajectories:
@@ -74,6 +88,7 @@ def draw_samples_from_sampler(
     lengths, angles = lattice_matrix_to_params_torch(all_samples.cell)
     all_samples = all_samples.replace(lengths=lengths, angles=angles)
 
+
     generated_strucs = structure_from_model_output(
         all_samples["pos"].reshape(-1, 3),
         all_samples["atomic_numbers"].reshape(-1),
@@ -82,7 +97,16 @@ def draw_samples_from_sampler(
         all_samples["num_atoms"].reshape(-1),
     )
 
+    if rank is not None:
+        generated_strucs = gather_for_distributed(generated_strucs, rank=rank)
+        if record_trajectories:
+            all_trajs_list = gather_for_distributed(all_trajs_list, rank=rank)
+
     if output_path is not None:
+        if rank not in (None, 0):
+            return generated_strucs
+
+        os.makedirs(output_path, exist_ok=True)
         assert cfg is not None
         # Save structures to disk in both a extxyz file and a compressed zip file.
         # do this before uploading to mongo in case there is an authentication error
@@ -137,6 +161,22 @@ def dump_trajectories(
     except ValueError as e:
         print(f"Got error ValueError '{e}' writing the trajectory to disk.")
 
+
+def gather_for_distributed(
+    local_out: list[T],
+    rank: int,
+) -> list[T]:
+    """Gather per-rank generated objects to rank 0 in rank order."""
+    world_size = ddp_utils.get_world_size()
+    gathered: list[list[T] | None] | None = [None for _ in range(world_size)] if rank == 0 else None
+    dist.gather_object(local_out, object_gather_list=gathered, dst=0)
+
+    if rank != 0:
+        return []
+
+    assert gathered is not None
+    assert all(rank_out is not None for rank_out in gathered)
+    return [item for rank_out in gathered for item in rank_out]
 
 def structure_from_model_output(
     frac_coords, atom_types, lengths, angles, num_atoms
@@ -202,10 +242,16 @@ class CrystalGenerator:
     sampling_config_path: Path | None = None
     sampling_config_name: str = "default"
 
+    # distributed 
+    distributed: bool | None = None
+
+    # local rank
+    local_rank: str | None = None
+
     record_trajectories: bool = True  # store all intermediate samples by default
 
     # These attributes are set when prepare() method is called.
-    _model: DiffusionLightningModule | None = None
+    _model: DiffusionModelModule | None = None
     _cfg: DictConfig | None = None
 
     # can be used to monitor progress of generation
@@ -218,9 +264,10 @@ class CrystalGenerator:
             "please add it to mattergen.common.data.num_atoms_distribution.NUM_ATOMS_DISTRIBUTIONS."
         )
         if self.target_compositions_dict:
-            assert self.cfg.lightning_module.diffusion_module.loss_fn.weights.get(
+            model_module_cfg = resolve_model_module_cfg(self.cfg)
+            assert model_module_cfg.diffusion_module.loss_fn.weights.get(
                 "atomic_numbers", 0.0
-            ) == 0.0 and "atomic_numbers" not in self.cfg.lightning_module.diffusion_module.corruption.get(
+            ) == 0.0 and "atomic_numbers" not in model_module_cfg.diffusion_module.corruption.get(
                 "discrete_corruptions", {}
             ), "Input model appears to have been trained for crystal generation (i.e., with atom type denoising), not crystal structure prediction. Please use a model trained for crystal structure prediction instead."
             sampling_cfg = self._load_sampling_config(
@@ -237,7 +284,7 @@ class CrystalGenerator:
                 )
 
     @property
-    def model(self) -> DiffusionLightningModule:
+    def model(self) -> DiffusionModelModule:
         self.prepare()
         assert self._model is not None
         return self._model
@@ -274,12 +321,15 @@ class CrystalGenerator:
         self,
         sampling_config: DictConfig,
         target_compositions_dict: list[dict[str, float]] | None = None,
+        distributed: bool | None = None,
     ) -> ConditionLoader:
         condition_loader_partial = instantiate(sampling_config.condition_loader_partial)
         if not target_compositions_dict:
-            return condition_loader_partial(properties=self.properties_to_condition_on)
+            return condition_loader_partial(properties=self.properties_to_condition_on,
+                                            distributed=distributed)
 
-        return condition_loader_partial(target_compositions_dict=target_compositions_dict)
+        return condition_loader_partial(target_compositions_dict=target_compositions_dict,
+                                        distributed=distributed)
 
     def load_sampling_config(
         self,
@@ -344,7 +394,8 @@ class CrystalGenerator:
         if self._model is not None:
             return
         model = load_model_diffusion(self.checkpoint_info)
-        model = model.to(get_device())
+        device = ddp_utils.resolve_device(self.local_rank)
+        model = model.to(device)
         self._model = model
         self._cfg = self.checkpoint_info.config
 
@@ -355,6 +406,12 @@ class CrystalGenerator:
         target_compositions_dict: list[dict[str, float]] | None = None,
         output_dir: str = "outputs",
     ) -> list[Structure]:
+    
+
+        rank = ddp_utils.get_rank() if self.distributed else None
+
+        #logger.info("DDP setup: %s - world size %s", ddp_utils.hostname_port_summary(),world_size)
+
         # Prioritize the runtime provided batch_size, num_batches and target_compositions_dict
         batch_size = batch_size or self.batch_size
         num_batches = num_batches or self.num_batches
@@ -374,10 +431,14 @@ class CrystalGenerator:
 
         print("\nSampling config:")
         print(OmegaConf.to_yaml(sampling_config, resolve=True))
-        condition_loader = self.get_condition_loader(sampling_config, target_compositions_dict)
+        condition_loader = self.get_condition_loader(sampling_config, 
+                                                     target_compositions_dict, 
+                                                     self.distributed)
 
         sampler_partial = instantiate(sampling_config.sampler_partial)
-        sampler = sampler_partial(pl_module=self.model)
+        sampler = sampler_partial(pl_module=self.model,
+                                  distributed=self.distributed)
+
 
         generated_structures = draw_samples_from_sampler(
             sampler=sampler,
@@ -387,6 +448,9 @@ class CrystalGenerator:
             properties_to_condition_on=self.properties_to_condition_on,
             record_trajectories=self.record_trajectories,
             progress_callback=self.progress_callback,
+            rank=rank
         )
+
+
 
         return generated_structures

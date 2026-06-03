@@ -11,7 +11,17 @@ from torch_geometric.typing import OptTensor
 
 
 class ChemGraph(pyg_data.Data):
-    r"""A ChemGraph is a Pytorch Geometric Data object describing a MLPotential molecular graph with atoms in 3D space.
+    r"""A ChemGraph IS a :class:`torch_geometric.data.Data` object.
+
+    It describes a crystalline / molecular graph with atoms in 3D space and is
+    the canonical PyG representation used everywhere in MatterGen. Because it
+    subclasses :class:`~torch_geometric.data.Data`, all PyG transforms,
+    batching utilities (:class:`~torch_geometric.data.Batch`), and dataloaders
+    work on it directly. Cached datasets (see
+    :mod:`mattergen.common.data.backends`) materialise ``ChemGraph`` objects
+    on the fly from a packed-array layout shared with HydraGNN-style
+    serialisation backends (pickle / ADIOS2).
+
     The data object can hold node-level, and graph-level attributes, as well as (pre-computed) edge information.
     In general, :class:`~torch_geometric.data.Data` tries to mimic the
     behaviour of a regular Python dictionary.

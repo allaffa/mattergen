@@ -21,12 +21,12 @@ from mattergen.common.globals import (
 )
 from mattergen.common.utils.data_classes import MatterGenCheckpointInfo
 from mattergen.common.utils.globals import get_device
-from mattergen.diffusion.lightning_module import DiffusionLightningModule
+from mattergen.diffusion.config import resolve_model_module_cfg
+from mattergen.diffusion.model_module import DiffusionModelModule
 
 # logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 def make_structure(
     lengths: torch.Tensor,
@@ -47,16 +47,16 @@ def make_structure(
 
 def load_model_diffusion(
     args: MatterGenCheckpointInfo,
-) -> DiffusionLightningModule:
+) -> DiffusionModelModule:
     assert args.load_epoch is not None
     ckpt = args.checkpoint_path
     logger.info(f"Loading model from checkpoint: {ckpt}")
     cfg = args.config
     try:
-        model, incompatible_keys = DiffusionLightningModule.load_from_checkpoint_and_config(
+        model, incompatible_keys = DiffusionModelModule.load_from_checkpoint_and_config(
             ckpt,
             map_location=get_device(),
-            config=cfg.lightning_module,
+            config=resolve_model_module_cfg(cfg),
             strict=args.strict_checkpoint_loading,
         )
     except hydra.errors.HydraException as e:
