@@ -4,6 +4,7 @@
 import os
 from pathlib import Path
 from typing import Literal
+import logging
 
 import fire
 from pymatgen.core.structure import Structure
@@ -11,7 +12,10 @@ from pymatgen.core.structure import Structure
 from mattergen.common.data.types import TargetProperty
 from mattergen.common.utils.data_classes import PRETRAINED_MODEL_NAME, MatterGenCheckpointInfo, ProgressCallback
 from mattergen.generator import CrystalGenerator
+from mattergen.common.utils import distributed as ddp_utils
 
+
+logger = logging.getLogger(__name__)
 
 def main(
     output_path: str,
@@ -19,6 +23,7 @@ def main(
     model_path: str | None = None,
     batch_size: int = 64,
     num_batches: int = 1,
+    num_atoms_distribution: str = 'ALEX_MP_20',
     config_overrides: list[str] | None = None,
     checkpoint_epoch: Literal["best", "last"] | int = "last",
     properties_to_condition_on: TargetProperty | None = None,
@@ -57,8 +62,16 @@ def main(
         pretrained_name is None or model_path is None
     ), "Only one of pretrained_name or model_path can be provided."
 
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
+    #ddp stuff
+    #backend_pref = native_cfg.get("distributed_backend", "auto") if native_cfg is not None else "auto"
+    backend_pref = "auto"
+    world_size, rank = ddp_utils.setup_ddp(backend=backend_pref)
+    distributed = world_size > 1
+    local_rank = ddp_utils.get_local_rank() if distributed else None
+
+    if rank == 0:
+        logger.info("DDP setup: %s - world size %s", ddp_utils.hostname_port_summary(),world_size)
+        if not os.path.exists(output_path): os.makedirs(output_path)
 
     sampling_config_overrides = sampling_config_overrides or []
     config_overrides = config_overrides or []
@@ -87,6 +100,7 @@ def main(
         properties_to_condition_on=properties_to_condition_on,
         batch_size=batch_size,
         num_batches=num_batches,
+        num_atoms_distribution=num_atoms_distribution,
         sampling_config_name=sampling_config_name,
         sampling_config_path=_sampling_config_path,
         sampling_config_overrides=sampling_config_overrides,
@@ -96,6 +110,8 @@ def main(
         ),
         target_compositions_dict=target_compositions,
         progress_callback=progress_callback,
+        distributed=distributed,
+        local_rank=local_rank
     )
     return generator.generate(output_dir=Path(output_path))
 

@@ -53,7 +53,20 @@ def resolve_model_module_cfg(cfg: Mapping[str, Any] | Any) -> Any:
 
     Raises ``ValueError`` if it is missing or empty.
     """
-    model_module_cfg = _cfg_get(cfg, "model_module")
+
+    # loading in from legacy config files can cause some issues
+    # this doesnt cause problems in training bc in training 
+    # it is assumed the user correctly prescribed all the configs
+    # and then model is simply loaded from the legacy checkpoints
+    # for generation the 'model path' needs to be prescribed which
+    # is used to read BOTH the config (containing legacy fields)
+    # and the checkpoints. the below works reasonably well despite being
+    # a little hacky
+
+    if 'lightning_module' in list(cfg.keys()):
+        model_module_cfg = _cfg_get(cfg, "lightning_module")
+    else:
+        model_module_cfg = _cfg_get(cfg, "model_module")
     if not model_module_cfg:
         raise ValueError(
             "Missing model module config: expected a non-empty `model_module` block."

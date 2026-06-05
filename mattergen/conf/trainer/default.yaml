@@ -6,7 +6,7 @@ max_epochs: ${data_module.max_epochs}
 accumulate_grad_batches: 1
 gradient_clip_val: 0.5
 gradient_clip_algorithm: value
-check_val_every_n_epoch: 5
+check_val_every_n_epoch: 1
 strategy: auto
   
 logger:

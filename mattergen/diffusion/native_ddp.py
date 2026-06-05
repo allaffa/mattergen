@@ -362,12 +362,18 @@ def fit(
             train_loss_sum += float(reduced_loss.item())
             train_steps += 1
 
+            lr = optimizer.param_groups[0]['lr']
+
             if _is_rank_zero(rank) and step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0:
                 logger.info(
-                    "epoch=%s step=%s loss_train=%.6f",
+                    "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
                     epoch,
                     step_idx,
+                    lr,
                     float(reduced_loss.item()),
+                    float(_metrics['pos'].item()),
+                    float(_metrics['cell'].item()),
+                    float(_metrics['atomic_numbers'].item()),
                 )
                 if wandb_run is not None:
                     wandb_run.log({"loss_train_step": float(reduced_loss.item()), "epoch": epoch})
@@ -375,27 +381,36 @@ def fit(
         avg_train = train_loss_sum / max(train_steps, 1)
         val_loss = None
 
+        lr = optimizer.param_groups[0]['lr']
+
         if val_loader is not None and ((epoch + 1) % check_val_every_n_epoch == 0):
             model.eval()
             val_loss_sum = 0.0
             val_steps = 0
+            val_metrics = {'atomic_numbers':0,'pos':0,'cell':0}
             with torch.no_grad():
                 for batch in val_loader:
                     batch = _to_device(batch, device)
                     loss, _metrics = calc_loss(model.module, batch) if distributed else calc_loss(model, batch)
                     reduced_loss = _mean_reduce(loss.detach(), distributed)
+                    val_metrics = {key:float(_mean_reduce(_metrics[key].detach(),distributed).item())+val for key,val in val_metrics.items()}
                     val_loss_sum += float(reduced_loss.item())
                     val_steps += 1
             val_loss = val_loss_sum / max(val_steps, 1)
+            val_metrics = {key:val/max(val_steps,1) for key,val in val_metrics.items()}
 
         _step_schedulers(scheduler_cfgs, when="epoch", val_loss=val_loss)
 
         if _is_rank_zero(rank):
             logger.info(
-                "epoch=%s loss_train=%.6f%s",
+                "epoch=%s lr=%1.2e loss_train=%.6f loss_val=%.6f pos_val=%.6f cell_val=%.6f  atom_val=%.6f",
                 epoch,
+                lr,
                 avg_train,
-                "" if val_loss is None else f" loss_val={val_loss:.6f}",
+                val_loss,
+                val_metrics['pos'],
+                val_metrics['cell'],
+                val_metrics['atomic_numbers'],
             )
             if wandb_run is not None:
                 metrics = {"loss_train": avg_train, "epoch": epoch}

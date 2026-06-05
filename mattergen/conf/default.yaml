@@ -2,11 +2,12 @@ hydra:
   run:
     dir: ${oc.env:OUTPUT_DIR,outputs/singlerun/${now:%Y-%m-%d}/${now:%H-%M-%S}}
 
-auto_resume: True
+auto_resume: False
+checkpoint_path: /home/3pf/projects/mattergen_jaime/mattergen/outputs/singlerun/2026-04-19/01-20-12/lightning_logs/version_0/checkpoints/last.ckpt
 trainer_backend: native_ddp
 
 defaults:
-  - data_module: mp_20
+  - data_module: RSSA_data
   - trainer: default
   - native_trainer: default
   - model_module: default
