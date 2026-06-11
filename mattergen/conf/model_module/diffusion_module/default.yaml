@@ -1,7 +1,7 @@
 _target_: mattergen.diffusion.diffusion_module.DiffusionModule
 loss_fn:
   _target_: mattergen.common.loss.MaterialsLoss
-  reduce: sum
+  reduce: per_atom_mean
   include_pos: True
   include_cell: True
   include_atomic_numbers: True

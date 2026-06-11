@@ -9,8 +9,8 @@ import torch
 
 from mattergen.diffusion.corruption.corruption import Corruption
 from mattergen.diffusion.corruption.multi_corruption import MultiCorruption, apply
-from mattergen.diffusion.corruption.sde_lib import SDE
-from mattergen.diffusion.data.batched_data import SimpleBatchedData
+from mattergen.diffusion.corruption.sde_lib import SDE, VESDE
+from mattergen.diffusion.data.batched_data import SimpleBatchedData, collate_fn
 from mattergen.diffusion.losses import DenoisingScoreMatchingLoss
 from mattergen.diffusion.tests.conftest import SDE_TYPES
 from mattergen.diffusion.training.field_loss import (
@@ -150,6 +150,69 @@ def test_weighted_summed_field_loss(
         torch.stack([weighted_loss_per_field[k] for k in weighted_loss_per_field.keys()]),
     )
     torch.testing.assert_allclose(sum(weighted_loss_per_field.values()), unweighted_loss)
+
+
+def test_per_atom_mean_reduces_atom_fields_by_atom_count_and_dense_fields_by_batch():
+    clean_batch = collate_fn(
+        [
+            {
+                "atomic_numbers": torch.ones(2, dtype=torch.long),
+                "foo": torch.randn(2, 3),
+                "cell": torch.randn(1, 3),
+            },
+            {
+                "atomic_numbers": torch.ones(5, dtype=torch.long),
+                "foo": torch.randn(5, 3),
+                "cell": torch.randn(1, 3),
+            },
+        ],
+        dense_field_names=("cell",),
+    )
+    multi_corruption = MultiCorruption(sdes={"foo": VESDE(), "cell": VESDE()})
+    t = torch.ones(clean_batch.get_batch_size())
+    noisy_batch = multi_corruption.sample_marginal(batch=clean_batch, t=t)
+    raw_noise = apply(
+        {k: compute_noise_given_sample_and_corruption for k in multi_corruption.corrupted_fields},
+        x=clean_batch,
+        x_noisy=noisy_batch,
+        corruption=multi_corruption.corruptions,
+        batch_idx=multi_corruption._get_batch_indices(clean_batch),
+        broadcast={"t": t, "batch": clean_batch},
+    )
+
+    zero_scores = {k: torch.zeros_like(v) for k, v in clean_batch.data.items()}
+    score_model_output = SimpleBatchedData(data=zero_scores, batch_idx=clean_batch.batch_idx)
+    loss_fn = DenoisingScoreMatchingLoss(
+        model_targets={"foo": "score_times_std", "cell": "score_times_std"},
+        reduce="per_atom_mean",
+    )
+
+    loss, loss_per_field = loss_fn(
+        batch=clean_batch,
+        multi_corruption=multi_corruption,
+        t=t,
+        score_model_output=score_model_output,
+        noisy_batch=noisy_batch,
+    )
+
+    foo_per_sample_sum = aggregate_per_sample(
+        raw_noise["foo"].pow(2),
+        batch_idx=clean_batch.batch_idx["foo"],
+        reduce="sum",
+        batch_size=clean_batch.get_batch_size(),
+    )
+    cell_per_sample = aggregate_per_sample(
+        raw_noise["cell"].pow(2),
+        batch_idx=None,
+        reduce="sum",
+        batch_size=clean_batch.get_batch_size(),
+    )
+    expected_foo = foo_per_sample_sum.sum() / clean_batch["atomic_numbers"].shape[0]
+    expected_cell = cell_per_sample.mean()
+
+    torch.testing.assert_allclose(loss_per_field["foo"], expected_foo)
+    torch.testing.assert_allclose(loss_per_field["cell"], expected_cell)
+    torch.testing.assert_allclose(loss, expected_foo + expected_cell)
 
 
 def test_wrapped_normal_loss(tiny_state_batch):

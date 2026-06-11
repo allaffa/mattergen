@@ -4,7 +4,7 @@ corruption: csp
 
 loss_fn:
   _target_: mattergen.common.loss.MaterialsLoss
-  reduce: sum
+  reduce: per_atom_mean
   include_pos: True
   include_cell: True
   include_atomic_numbers: False
