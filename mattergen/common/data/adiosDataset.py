@@ -96,11 +96,11 @@ class LazyAdiosCrystalDataset(Dataset):
 
         # Make the chemgraph
         data = ChemGraph(
-                pos = pos,
-                cell = cell,
-                atomic_numbers = atomic_numbers,
-                num_atoms = natoms,
-                num_nodes = natoms,
+                pos = torch.from_numpy(pos).float() % 1.0,
+                cell = torch.from_numpy(cell).unsqueeze(0),
+                atomic_numbers = torch.from_numpy(atomic_numbers),
+                num_atoms = torch.tensor(natoms),
+                num_nodes = torch.tensor(natoms),
                 **props
             )
         
