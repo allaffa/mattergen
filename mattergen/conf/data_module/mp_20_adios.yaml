@@ -20,30 +20,24 @@ average_density: 0.05771451654022283 # atoms/Angstrom**3 : this is used in model
 root_dir: ${oc.env:PROJECT_ROOT}/../../../data/mp_20
 
 train_dataset:
-  _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
-  cache_path: ${data_module.root_dir}/train
+  _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file
+  split: trainset
+  data_path: ${data_module.root_dir}
   properties: ${data_module.properties}
   transforms: ${data_module.transforms}
   dataset_transforms: ${data_module.dataset_transforms}
 
 val_dataset:
-  _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
-  cache_path: ${data_module.root_dir}/val
-  properties: ${data_module.properties}
-  transforms: ${data_module.transforms}
-  dataset_transforms: ${data_module.dataset_transforms}
-
-test_dataset:
-  _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
-  cache_path: ${data_module.root_dir}/test
+  _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file
+  split: valset
+  data_path: ${data_module.root_dir}
   properties: ${data_module.properties}
   transforms: ${data_module.transforms}
   dataset_transforms: ${data_module.dataset_transforms}
 
 num_workers:
-  train: 16
-  val: 16
-  test: 16
+  train: 0
+  val: 0
 
 batch_size:
   # total batch size of 512, adjust for number of devices, nodes, and gradient accumulation

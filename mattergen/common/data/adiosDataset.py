@@ -4,6 +4,77 @@ from mattergen.common.data.chemgraph import ChemGraph
 import adios2
 import numpy as np
 
+# this is terrible but trying to load twice will make it work...
+try:    
+    from hydragnn.utils.datasets.adiosdataset import AdiosDataset
+except:
+    from hydragnn.utils.datasets.adiosdataset import AdiosDataset
+
+
+class HydraGNNAdiosCrystalDataset(AdiosDataset):
+
+    def __init__(self, *args, transforms=None,properties=None, **kwargs):
+        self.transforms = transforms
+        super().__init__(*args, **kwargs)
+        """
+        Parameters for AdiosDataset
+        ----------
+        filename: str
+            adios filename
+        label: str
+            data label to load, such as trainset, testing, and valset
+        comm: MPI_comm
+            MPI communicator
+        preload: bool, optional
+            Option to preload all the datasets into a memory
+        shmem: bool, optional
+            Option to use shmem to share data between processes in the same node
+        enable_cache: bool, optional
+            Option to cache data object which was already read
+        ddstore: bool, optional
+            Option to use Distributed Data Store
+        """
+    def __getitem__(self, idx):
+
+        # just use the parent class get method
+        object = super().get(self,idx)
+
+        # Get number of atoms in the structure
+        natoms = object.natoms
+
+        # Get the atomic numbers of the atoms in the structure 
+        atomic_numbers = object.atomic_numbers.reshape(-1)
+
+        # Get the positions of the atoms in the structure
+        pos = object.pos
+
+        # Cell is stored as 3 rows of width 3 per structure.
+        cell = object.cell.reshape(3,3)
+
+        # Get all the requested properties - leave for later
+        props = {}
+
+        # Make the chemgraph
+        data = ChemGraph(
+                pos = torch.from_numpy(pos).float() % 1.0,
+                cell = torch.from_numpy(cell).unsqueeze(0),
+                atomic_numbers = torch.from_numpy(atomic_numbers),
+                num_atoms = torch.tensor(natoms),
+                num_nodes = torch.tensor(natoms),
+                **props
+            )
+        
+        # Apply transforms
+        if self.transforms is not None:
+            for t in self.transforms:
+                data = t(data)
+
+        # spit it back
+        return(data)
+    
+    
+
+
 class LazyAdiosCrystalDataset(Dataset):
     """
     Map-style dataset for DataLoader/DistributedSampler.

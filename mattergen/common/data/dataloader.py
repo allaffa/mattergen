@@ -70,5 +70,8 @@ def build_split_dataloader(
         num_workers=num_workers,
         worker_init_fn=worker_init_fn,
         collate_fn=collate,
+        # pin_memory=True,
+        # persistent_workers=True,
+        # prefetch_factor=4
     )
     return loader, sampler

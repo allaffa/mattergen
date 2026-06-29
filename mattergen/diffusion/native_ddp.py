@@ -30,7 +30,7 @@ def _is_rank_zero(rank: int) -> bool:
 
 def _to_device(batch: Any, device: torch.device):
     if hasattr(batch, "to"):
-        return batch.to(device)
+        return batch.to(device,non_blocking=True)
     return batch
 
 
