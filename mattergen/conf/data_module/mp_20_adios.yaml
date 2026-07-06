@@ -5,14 +5,6 @@ properties: []
   # - dft_bulk_modulus
   # - dft_band_gap
   # - dft_mag_density
-  # - ml_bulk_modulus
-  # - hhi_score
-  # - space_group
-  # - energy_above_hull
-
-dataset_transforms: 
-  - _target_: mattergen.common.data.dataset_transform.filter_sparse_properties
-    _partial_: true
 
 transforms:
 - _target_: mattergen.common.data.transform.symmetrize_lattice
@@ -20,8 +12,12 @@ transforms:
 - _target_: mattergen.common.data.transform.set_chemical_system_string
   _partial_: true
 
-average_density: 0.051251229184970416 # atoms/Angstrom**3
-root_dir: ${oc.env:PROJECT_ROOT}/../../../adios/data/miniOMat24
+dataset_transforms: 
+  - _target_: mattergen.common.data.dataset_transform.filter_sparse_properties
+    _partial_: true
+
+average_density: 0.05771451654022283 # atoms/Angstrom**3 : this is used in models/scripts/run.py to set lattice_limit_density
+root_dir: /lustre/orion/lrn070/proj-shared/patxi/adios/data/mp20
 
 train_dataset:
   _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
@@ -45,9 +41,8 @@ num_workers:
 
 batch_size:
   # total batch size of 512, adjust for number of devices, nodes, and gradient accumulation
-  # train:  ${eval:'((512//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
-  # val: ${eval:'((128//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
   train:  ${eval:'(512//8)'}
-  val: ${eval:'(512//8)'}
+  val: ${eval:'(64//8)'}
+  test: ${eval:'(64//8)'}
 
-max_epochs: 50000
+max_epochs: 900

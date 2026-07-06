@@ -3,16 +3,14 @@
 #SBATCH -J HydraGNN
 #SBATCH -o mattergen-%j.out
 #SBATCH -e mattergen-%j.out
-#SBATCH -t 00:30:00
+#SBATCH -t 02:00:00
 #SBATCH -p batch 
 ##SBATCH -q debug
-#SBATCH -N 2 # 128  
-##SBATCH -S 1
+#SBATCH -N 16 # 128  
+##SBATCH -S 1 
 
- 
-
-CASE_ROOT=/lustre/orion/lrn070/proj-shared/zhangp/mattergen
-source $CASE_ROOT/installation_scripts/module-to-load-frontier-rocm720.sh
+CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/adiosdataset/mattergen
+source $CASE_ROOT/module-to-load-frontier-rocm720.sh
 
 export PYTHONPATH=$PWD:$PYTHONPATH
 export PYTHONPATH=/lustre/orion/lrn070/world-shared/mlupopa/HydraGNN-Installation-Frontier/ADIOS2-Frontier/adios2-build/lib/python3.11/site-packages/:$PYTHONPATH
@@ -41,6 +39,8 @@ export HYDRAGNN_NUM_WORKERS=0
 export HYDRAGNN_USE_VARIABLE_GRAPH_SIZE=1
 export HYDRAGNN_AGGR_BACKEND=mpi
 export HYDRAGNN_VALTEST=1
+export HYDRA_FULL_ERROR=1
+
 
 ## Getting error without these after 20 nodes
 export NCCL_P2P_LEVEL=NVL
@@ -79,7 +79,7 @@ env | grep ^HYDRA
 
 #srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
 
-srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
+srun --ntasks-per-node=8  mattergen-train ~trainer.logger
 
 
 

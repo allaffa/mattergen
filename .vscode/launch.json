@@ -11,7 +11,7 @@
             "request": "launch",
             "program": "mattergen/scripts/run.py",
             "console": "integratedTerminal",
-            "cwd": "/home/3pf/projects/lrn070/jaime/mattergen",
+            "cwd": "lustre/orion/lrn070/proj-shared/patxi/adiosdataset/mattergen",
             "env": {"PYTHONPATH": "${workspaceFolder}"}
         },
 
@@ -21,7 +21,7 @@
             "request": "launch",
             "program": "mattergen/scripts/generate.py",
             "console": "integratedTerminal",
-            "cwd": "/home/3pf/projects/lrn070/jaime/mattergen",
+            "cwd": "lustre/orion/lrn070/proj-shared/patxi/adiosdataset/mattergen",
             "env": {"PYTHONPATH": "${workspaceFolder}"},
             "args": ["model_path=checkpoints/mp_20_base"]
         }
