@@ -20,11 +20,11 @@ transforms:
 - _target_: mattergen.common.data.transform.set_chemical_system_string
   _partial_: true
 
-average_density: 0.051251229184970416 # atoms/Angstrom**3 : this is used in models/scripts/run.py to set lattice_limit_density
-root_dir: ${oc.env:PROJECT_ROOT}/../../../data/miniOMat24
+average_density: 0.051251229184970416 # atoms/Angstrom**3
+root_dir: ${oc.env:PROJECT_ROOT}/../../../adios/data/miniOMat24
 
 train_dataset:
-  _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file
+  _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
   split: trainset
   data_path: ${data_module.root_dir}
   properties: ${data_module.properties}
@@ -32,7 +32,7 @@ train_dataset:
   dataset_transforms: ${data_module.dataset_transforms}
 
 val_dataset:
-  _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file
+  _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
   split: valset
   data_path: ${data_module.root_dir}
   properties: ${data_module.properties}
@@ -40,12 +40,14 @@ val_dataset:
   dataset_transforms: ${data_module.dataset_transforms}
 
 num_workers:
-  train: 0
-  val: 0
+  train: 8
+  val: 8
 
 batch_size:
   # total batch size of 512, adjust for number of devices, nodes, and gradient accumulation
-  train:  ${eval:'((512//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
-  val: ${eval:'((128//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
+  # train:  ${eval:'((512//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
+  # val: ${eval:'((128//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
+  train:  ${eval:'(512//8)'}
+  val: ${eval:'(512//8)'}
 
 max_epochs: 50000

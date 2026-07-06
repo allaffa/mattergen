@@ -17,7 +17,7 @@ dataset_transforms:
     _partial_: true
 
 average_density: 0.05771451654022283 # atoms/Angstrom**3 : this is used in models/scripts/run.py to set lattice_limit_density
-root_dir: ${oc.env:PROJECT_ROOT}/../../../data/mp_20
+root_dir: ${oc.env:PROJECT_ROOT}/../../../mattergen/datasets/cache/mp_20
 
 train_dataset:
   _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
@@ -41,14 +41,14 @@ test_dataset:
   dataset_transforms: ${data_module.dataset_transforms}
 
 num_workers:
-  train: 16
-  val: 16
-  test: 16
+  train: 8
+  val: 8
+  test: 8
 
 batch_size:
   # total batch size of 512, adjust for number of devices, nodes, and gradient accumulation
-  train:  ${eval:'(512//4)'}
-  val: ${eval:'(64//4)'}
-  test: ${eval:'(64//4)'}
+  train:  ${eval:'(512//8)'}
+  val: ${eval:'(64//8)'}
+  test: ${eval:'(64//8)'}
 
 max_epochs: 900

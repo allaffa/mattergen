@@ -9,7 +9,8 @@
 *.user
 *.userosscache
 *.sln.docstates
-
+*.out
+.vscode/
 
 out*.txt
 trainJogo.sh

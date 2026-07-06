@@ -13,6 +13,7 @@ ml miniforge3/23.11.0-0
 module unload darshan-runtime
 export LD_LIBRARY_PATH=${CRAY_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}
 conda deactivate
-conda activate /lustre/orion/lrn070/proj-shared/patxi/envs/hydragenn_mattergen720
+#conda activate /lustre/orion/lrn070/proj-shared/patxi/envs/hydragenn_mattergen720_adios
+conda activate /lustre/orion/lrn070/proj-shared/patxi/envs/HydraGNN-Installation-Frontier/hydragnn_venv
 
 #python -c "import torch; print(torch.__version__)"

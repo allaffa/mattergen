@@ -15,6 +15,7 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
 
     def __init__(self, *args, transforms=None,properties=None, **kwargs):
         self.transforms = transforms
+
         super().__init__(*args, **kwargs)
         """
         Parameters for AdiosDataset
@@ -34,13 +35,13 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
         ddstore: bool, optional
             Option to use Distributed Data Store
         """
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> ChemGraph:
 
         # just use the parent class get method
-        object = super().get(self,idx)
+        object = super().get(idx)
 
         # Get number of atoms in the structure
-        natoms = object.natoms
+        natoms = object.atomic_numbers.shape[0]
 
         # Get the atomic numbers of the atoms in the structure 
         atomic_numbers = object.atomic_numbers.reshape(-1)
@@ -54,16 +55,17 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
         # Get all the requested properties - leave for later
         props = {}
 
+
         # Make the chemgraph
         data = ChemGraph(
-                pos = torch.from_numpy(pos).float() % 1.0,
-                cell = torch.from_numpy(cell).unsqueeze(0),
-                atomic_numbers = torch.from_numpy(atomic_numbers),
-                num_atoms = torch.tensor(natoms),
-                num_nodes = torch.tensor(natoms),
+                pos = pos % 1.0,
+                cell = cell.unsqueeze(0),
+                atomic_numbers = atomic_numbers,
+                num_atoms = natoms,
+                num_nodes = natoms,
                 **props
             )
-        
+
         # Apply transforms
         if self.transforms is not None:
             for t in self.transforms:
@@ -72,6 +74,7 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
         # spit it back
         return(data)
     
+
     
 
 
