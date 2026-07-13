@@ -15,6 +15,7 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
 
     def __init__(self, *args, transforms=None,properties=None, **kwargs):
         self.transforms = transforms
+        self.property_names = set(properties or [])
 
         super().__init__(*args, **kwargs)
         """
@@ -55,6 +56,11 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
         # Get all the requested properties - leave for later
         props = {}
 
+        # Read in forces and compute force_rms if requested
+        if "force_rms" in self.property_names:
+            forces = torch.as_tensor(object.forces, dtype=torch.float32).reshape(natoms, 3)
+            force_rms = torch.sqrt(torch.sum(forces.square(), dim=-1).mean())
+            props["force_rms"] = force_rms.clamp_min(1e-8).reshape(1)
 
         # Make the chemgraph
         data = ChemGraph(
