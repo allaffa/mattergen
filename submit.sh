@@ -3,16 +3,17 @@
 #SBATCH -J HydraGNN
 #SBATCH -o mattergen-%j.out
 #SBATCH -e mattergen-%j.out
-#SBATCH -t 02:00:00
+#SBATCH -t 00:15:00
 #SBATCH -p batch 
-##SBATCH -q debug
-#SBATCH -N 16 # 128  
-##SBATCH -S 1 
+#SBATCH -q debug
+#SBATCH -N 1 # 128  
+#SBATCH --ntasks-per-node=8
 
-CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/adiosdataset/mattergen
+CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/jaime/mattergen
 source $CASE_ROOT/module-to-load-frontier-rocm720.sh
 
 export PYTHONPATH=$PWD:$PYTHONPATH
+#export PYTHONPATH=/lustre/orion/lrn070/proj-shared/patxi/envs/HydraGNN-Installation-Frontier/ADIOS2-Frontier/adios2-build/lib/python3.11/site-packages/:$PYTHONPATH
 export PYTHONPATH=/lustre/orion/lrn070/world-shared/mlupopa/HydraGNN-Installation-Frontier/ADIOS2-Frontier/adios2-build/lib/python3.11/site-packages/:$PYTHONPATH
 
 which python
@@ -79,7 +80,8 @@ env | grep ^HYDRA
 
 #srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
 
-srun --ntasks-per-node=8  mattergen-train ~trainer.logger
+srun -N$SLURM_JOB_NUM_NODES -n$((SLURM_JOB_NUM_NODES*8)) -c 7 --gpus-per-node=8 mattergen-train ~trainer.logger
+
 
 
 

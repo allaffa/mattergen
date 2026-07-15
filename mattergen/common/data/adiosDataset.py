@@ -27,6 +27,8 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
             data label to load, such as trainset, testing, and valset
         comm: MPI_comm
             MPI communicator
+        keys: list of str
+            what keys in the adios file to consider
         preload: bool, optional
             Option to preload all the datasets into a memory
         shmem: bool, optional
