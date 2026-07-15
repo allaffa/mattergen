@@ -9,6 +9,6 @@ conditional_embedding_module:
   _target_: mattergen.diffusion.model_utils.NoiseLevelEncoding
   d_model: ${model_module.diffusion_module.model.hidden_dim}
 
-scaler:
-  _target_: mattergen.common.utils.data_utils.StandardScalerTorch
-  log10_transform: true
+# scaler:
+#   _target_: mattergen.common.utils.data_utils.StandardScalerTorch
+#   log10_transform: true

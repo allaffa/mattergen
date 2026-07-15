@@ -155,17 +155,13 @@ class BaseDataset(Dataset):
             The dataset.
         """
 
-        # assuming there is ONE file in that path that has everything
-        # perhaps kinda weird
-        file = glob.glob(os.path.join(data_path,'*.bp'))[0]
-
         # note that currently there is no dataset_transform
         # the default mattergen has "filter_sparse_properties"
         # which sounds like some pruning/screening over the entire
         # dataset. thats a little wierd for adios file. 
         # ignoring for now - maybe include back in later
         return LazyAdiosCrystalDataset(
-            path=file,
+            path=data_path,
             split=split,
             transforms=transforms,
             properties=properties
@@ -178,6 +174,7 @@ class BaseDataset(Dataset):
         data_path: str,
         transforms: list[Transform] | None = None,
         properties: list[PropertySourceId] | None = None,
+        keys: list[str] | None = None,
         dataset_transforms: list[DatasetTransform] | None = None,
         comm: Any = None,
     ) -> T:
@@ -198,17 +195,14 @@ class BaseDataset(Dataset):
             The dataset.
         """
 
-        # assuming there is ONE file in that path that has everything
-        # perhaps kinda weird
-        file = glob.glob(os.path.join(data_path,'*.bp'))[0]
-
         # note that currently there is no dataset_transform
         # the default mattergen has "filter_sparse_properties"
         # which sounds like some pruning/screening over the entire
         # dataset. thats a little wierd for adios file. 
         # ignoring for now - maybe include back in later
         return HydraGNNAdiosCrystalDataset(
-            filename=file,
+            filename=data_path,
+            keys=keys,
             label=split,
             comm=MPI.COMM_WORLD,
             transforms=transforms,
