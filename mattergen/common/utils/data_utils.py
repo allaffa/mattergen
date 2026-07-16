@@ -273,36 +273,65 @@ def radius_graph_pbc(
     )
     return edge_index, unit_cell, num_neighbors_image
 
+import torch
+from typing import Sequence
+
+# assumed to already exist in your codebase
+# EPSILON = ...
+# torch_nanstd = ...
 
 class StandardScalerTorch(torch.nn.Module):
-    """Normalizes the targets of a dataset."""
+    """Normalizes the targets of a dataset.
+
+    If `means` and `stds` are provided at initialization, they are treated as
+    precomputed statistics and `fit()` becomes a no-op.
+    """
 
     def __init__(
         self,
-        means: torch.Tensor | None = None,
-        stds: torch.Tensor | None = None,
-        stats_dim: tuple[int] = (
-            1,
-        ),  # dimension of mean, std stats (= X.shape[1:] for some input tensor X)
-        log10_transform: bool = False,  # whether to log10-transform the property before scaling
+        means: torch.Tensor | float | Sequence[float] | None = None,
+        stds: torch.Tensor | float | Sequence[float] | None = None,
+        stats_dim: tuple[int, ...] = (1,),
+        log10_transform: bool = False,
     ):
         super().__init__()
-        # we need to make sure that we initialize means and stds with the right shapes
-        # otherwise, we cannot load checkpoints of fitted means/stds.
-        # ignore stats_dim if means and stds are provided
+
+        if (means is None) != (stds is None):
+            raise ValueError("Either provide both `means` and `stds`, or neither.")
+
+        means_tensor = None if means is None else torch.atleast_1d(torch.as_tensor(means, dtype=torch.float32))
+        stds_tensor = None if stds is None else torch.atleast_1d(torch.as_tensor(stds, dtype=torch.float32))
+
+        self._has_precomputed_stats = means_tensor is not None and stds_tensor is not None
+
         self.register_buffer(
-            "means", torch.atleast_1d(means) if means is not None else torch.empty(stats_dim)
+            "means",
+            means_tensor if means_tensor is not None else torch.empty(stats_dim, dtype=torch.float32),
         )
         self.register_buffer(
-            "stds", torch.atleast_1d(stds) if stds is not None else torch.empty(stats_dim)
+            "stds",
+            stds_tensor if stds_tensor is not None else torch.empty(stats_dim, dtype=torch.float32),
         )
+
         self.log10_transform = log10_transform
 
     @property
     def device(self) -> torch.device:
         return self.means.device  # type: ignore
 
+    @property
+    def has_precomputed_stats(self) -> bool:
+        return self._has_precomputed_stats
+
+    @property
+    def is_fitted(self) -> bool:
+        return self.means.numel() > 0 and self.stds.numel() > 0
+
     def fit(self, X: torch.Tensor):
+        # If stats were provided by config/user, do not recompute from dataset.
+        if self._has_precomputed_stats:
+            return
+
         if self.log10_transform:
             assert torch.all(X > 0), "All values must be positive for log10 transform"
             X = torch.log10(X)
@@ -311,36 +340,32 @@ class StandardScalerTorch(torch.nn.Module):
         stds: torch.Tensor = torch.atleast_1d(
             torch_nanstd(X, dim=0, unbiased=False).to(self.device) + EPSILON
         )
-        # mypy gets really confused about variables registered via register_buffer,
-        # so we need to ignore a lot of type errors below
-        assert (
-            means.shape == self.means.shape  # type: ignore
-        ), f"Mean shape mismatch: {means.shape} != {self.means.shape}"  # type: ignore
-        assert (
-            stds.shape == self.stds.shape  # type: ignore
-        ), f"Std shape mismatch: {stds.shape} != {self.stds.shape}"  # type: ignore
+
+        assert means.shape == self.means.shape, f"Mean shape mismatch: {means.shape} != {self.means.shape}"  # type: ignore
+        assert stds.shape == self.stds.shape, f"Std shape mismatch: {stds.shape} != {self.stds.shape}"  # type: ignore
+
         self.means = means  # type: ignore
         self.stds = stds  # type: ignore
 
     def transform(self, X: torch.Tensor) -> torch.Tensor:
-        assert self.means is not None and self.stds is not None
+        assert self.is_fitted, "Scaler must be fitted or initialized with means/stds."
         if self.log10_transform:
             assert torch.all(X > 0), "All values must be positive for log10 transform"
             X = torch.log10(X)
         return (X - self.means) / self.stds
 
     def inverse_transform(self, X: torch.Tensor) -> torch.Tensor:
-        assert self.means is not None and self.stds is not None
+        assert self.is_fitted, "Scaler must be fitted or initialized with means/stds."
         X = X * self.stds + self.means
         if self.log10_transform:
             X = torch.pow(10, X)
         return X
 
-    def match_device(self, X: torch.Tensor) -> torch.Tensor:
-        assert self.means.numel() > 0 and self.stds.numel() > 0
+    def match_device(self, X: torch.Tensor) -> None:
+        assert self.is_fitted, "Scaler must be fitted or initialized with means/stds."
         if self.means.device != X.device:
-            self.means = self.means.to(X.device)
-            self.stds = self.stds.to(X.device)
+            self.means = self.means.to(X.device)  # type: ignore
+            self.stds = self.stds.to(X.device)  # type: ignore
 
     def copy(self) -> "StandardScalerTorch":
         return StandardScalerTorch(
@@ -355,11 +380,11 @@ class StandardScalerTorch(torch.nn.Module):
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}("
-            f"means: {self.means.tolist() if self.means is not None else None}, "
-            f"stds: {self.stds.tolist() if self.stds is not None else None})"
-            f"log10_transform: {self.log10_transform}"
+            f"means={self.means.tolist()}, "
+            f"stds={self.stds.tolist()}, "
+            f"log10_transform={self.log10_transform}, "
+            f"has_precomputed_stats={self._has_precomputed_stats})"
         )
-
 
 def torch_nanstd(x: torch.Tensor, dim: int, unbiased: bool) -> torch.Tensor:
     data_is_present = torch.all(

@@ -20,15 +20,18 @@ def compute_property_scalers(datamodule: Any, property_embeddings: torch.nn.Modu
     property_values = defaultdict(list)
 
     # property names may be distinct from keys in this dictionary
-    property_names = [p.name for p in property_embeddings.values() if not isinstance(p.scaler, torch.nn.Identity)]
+    # also dont include properties that 
+    property_names = [p.name for p in property_embeddings.values() \
+                      if ((not isinstance(p.scaler, torch.nn.Identity) )and \
+                        (not p.scaler._has_precomputed_stats))]
     if len(property_names) == 0:
         return
 
     train_loader = datamodule.train_dataloader()
-    for batch in tqdm(train_loader, desc="Fitting property scalers"):
-        for property_name in property_names:
-            # concat all values in train dataset for this given property
-            property_values[property_name].append(batch[property_name])
+    for property_name in property_names:
+        for batch in tqdm(train_loader, desc=f"Fitting property {property_name} scalers"):
+                # concat all values in train dataset for this given property
+                property_values[property_name].append(batch[property_name])
 
     for property_name in property_names:
         property_embeddings[property_name].fit_scaler(
