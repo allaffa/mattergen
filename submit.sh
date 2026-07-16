@@ -3,10 +3,10 @@
 #SBATCH -J HydraGNN
 #SBATCH -o mattergen-%j.out
 #SBATCH -e mattergen-%j.out
-#SBATCH -t 00:15:00
+#SBATCH -t 00:30:00
 #SBATCH -p batch 
 #SBATCH -q debug
-#SBATCH -N 1 # 128  
+#SBATCH -N 16 # 128  
 #SBATCH --ntasks-per-node=8
 
 CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/jaime/mattergen

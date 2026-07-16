@@ -12,5 +12,5 @@ conditional_embedding_module:
 scaler:
   _target_: mattergen.common.utils.data_utils.StandardScalerTorch
   log10_transform: true
-  means: 0.09097193 #computed from a sample of 8455
-  stds: 0.48697470 #computed from a sample of 8455
+  means: 0.09097193 #log10 mean computed from a sample of 8455
+  stds: 0.48697470 #log10 std computed from a sample of 8455
