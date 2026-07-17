@@ -3,10 +3,10 @@
 #SBATCH -J HydraGNN
 #SBATCH -o mattergen-%j.out
 #SBATCH -e mattergen-%j.out
-#SBATCH -t 00:30:00
+#SBATCH -t 00:15:00
 #SBATCH -p batch 
 #SBATCH -q debug
-#SBATCH -N 16 # 128  
+#SBATCH -N 8 # 128  
 #SBATCH --ntasks-per-node=8
 
 CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/jaime/mattergen
@@ -44,9 +44,9 @@ export HYDRA_FULL_ERROR=1
 
 
 ## Getting error without these after 20 nodes
-export NCCL_P2P_LEVEL=NVL
-export NCCL_P2P_DISABLE=1
-export FI_MR_CACHE_MONITOR=disabled
+# export NCCL_P2P_LEVEL=NVL
+# export NCCL_P2P_DISABLE=1
+# export FI_MR_CACHE_MONITOR=disabled
 
 ## aws-ofi-rccl plugin settings
 export TORCH_NCCL_HIGH_PRIORITY=1
@@ -60,9 +60,9 @@ export FI_CXI_DEFAULT_CQ_SIZE=131072  # Ask the network stack to allocate additi
 export FI_CXI_DEFAULT_TX_SIZE=2048    # Ask the network stack to allocate additional space to hold pending outgoing messages.
 export FI_CXI_RX_MATCH_MODE=hybrid    # Allow the network stack to transition to software mode if necessary.
  
-export NCCL_NET_GDR_LEVEL=3           # Typically improves performance, but remove this setting if you encounter a hang/crash.
-export NCCL_CROSS_NIC=1               # On large systems, this NCCL setting has been found to improve performance
-export NCCL_SOCKET_IFNAME=hsn0        # NCCL/RCCL will use the high speed network to coordinate startup.
+#export NCCL_NET_GDR_LEVEL=3           # Typically improves performance, but remove this setting if you encounter a hang/crash.
+# export NCCL_CROSS_NIC=1               # On large systems, this NCCL setting has been found to improve performance
+# export NCCL_SOCKET_IFNAME=hsn0        # NCCL/RCCL will use the high speed network to coordinate startup.
 
 
 ## Checking
