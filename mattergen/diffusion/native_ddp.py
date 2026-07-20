@@ -86,6 +86,7 @@ def _extract_checkpoint_cfg(trainer_cfg: DictConfig) -> dict[str, Any]:
             "save_top_k": int(checkpoint_cfg.get("save_top_k", 1)),
             "save_last": bool(checkpoint_cfg.get("save_last", True)),
             "every_n_epochs": int(checkpoint_cfg.get("every_n_epochs", 1)),
+            "every_n_train_steps": int(checkpoint_cfg.get("every_n_train_steps", 0)),
             "filename": checkpoint_cfg.get("filename", "{epoch}-{loss_val:.2f}"),
         }
 
@@ -99,6 +100,7 @@ def _extract_checkpoint_cfg(trainer_cfg: DictConfig) -> dict[str, Any]:
                 "save_top_k": int(callback_cfg.get("save_top_k", 1)),
                 "save_last": bool(callback_cfg.get("save_last", True)),
                 "every_n_epochs": int(callback_cfg.get("every_n_epochs", 1)),
+                "every_n_train_steps": int(callback_cfg.get("every_n_train_steps", 0)),
                 "filename": callback_cfg.get("filename", "{epoch}-{loss_val:.2f}"),
             }
     return {
@@ -107,6 +109,7 @@ def _extract_checkpoint_cfg(trainer_cfg: DictConfig) -> dict[str, Any]:
         "save_top_k": 1,
         "save_last": True,
         "every_n_epochs": 1,
+        "every_n_train_steps": 0,
         "filename": "{epoch}-{loss_val:.2f}",
     }
 
@@ -152,7 +155,7 @@ def _load_checkpoint(
     model_module: DiffusionModelModule[BatchedData],
     optimizer: torch.optim.Optimizer,
     scheduler_cfgs: list[dict[str, Any]],
-) -> tuple[int, float | None]:
+) -> tuple[int, int, int, float | None]:
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     model_module.load_state_dict(checkpoint["state_dict"], strict=True)
 
@@ -164,9 +167,17 @@ def _load_checkpoint(
     for scheduler_cfg, scheduler_state in zip(scheduler_cfgs, scheduler_states):
         scheduler_cfg["scheduler"].load_state_dict(scheduler_state)
 
-    next_epoch = int(checkpoint.get("epoch", -1)) + 1
+    saved_epoch = int(checkpoint.get("epoch", -1))
+    saved_batch_idx = int(checkpoint.get("batch_idx",-1))
+    if saved_batch_idx >= 0:
+        start_epoch = saved_epoch
+        next_batch_idx = saved_batch_idx + 1
+    else:
+        start_epoch = saved_epoch + 1
+        next_batch_idx = 0
+    global_step = max(0,int(checkpoint.get("global_step",0)))
     best_metric = checkpoint.get("best_metric")
-    return next_epoch, best_metric
+    return start_epoch, next_batch_idx, global_step, best_metric
 
 
 def _save_config_yaml(config_dict: dict[str, Any], output_dir: Path) -> None:
@@ -181,6 +192,8 @@ def _save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
+    batch_idx: int,
+    global_step: int,
     val_loss: float | None,
     config_dict: dict[str, Any],
     scheduler_cfgs: list[dict[str, Any]],
@@ -194,6 +207,8 @@ def _save_checkpoint(
     metric_value = val_loss
     ckpt_payload = {
         "epoch": epoch,
+        "batch_idx": batch_idx,
+        "global_step": global_step,
         "state_dict": model.state_dict(),
         "optimizer_states": [optimizer.state_dict()],
         "scheduler_states": [cfg["scheduler"].state_dict() for cfg in scheduler_cfgs],
@@ -316,8 +331,10 @@ def fit(
 
     best_val = float("inf")
     start_epoch = 0
+    resume_batch_idx = 0
+    global_step = 0
     if ckpt_path is not None:
-        start_epoch, loaded_best = _load_checkpoint(
+        start_epoch, resume_batch_idx, global_step, loaded_best = _load_checkpoint(
             ckpt_path,
             model_module=model_module,
             optimizer=optimizer,
@@ -326,7 +343,8 @@ def fit(
         if loaded_best is not None:
             best_val = float(loaded_best)
         if _is_rank_zero(rank):
-            logger.info("Resumed native training from %s at epoch=%s", ckpt_path, start_epoch)
+            logger.info("Resumed native training from %s at epoch=%s batch=%s global_step=%s", 
+                        ckpt_path, start_epoch, resume_batch_idx, global_step,)
 
     best_k: list[tuple[float, Path]] = []
 
@@ -338,6 +356,10 @@ def fit(
         train_loss_sum = 0.0
         train_steps = 0
         for step_idx, batch in enumerate(train_loader):
+            # Makes sure we skip to right batch when starting from checkpoint
+            if epoch == start_epoch and step_idx < resume_batch_idx:
+                continue
+            
             batch = _to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
 
@@ -361,6 +383,36 @@ def fit(
             reduced_loss = _mean_reduce(loss.detach(), distributed)
             train_loss_sum += float(reduced_loss.item())
             train_steps += 1
+
+            # Increment global step and save if required
+            global_step += 1
+            every_n_train_steps = int(ckpt_cfg.get("every_n_train_steps", 0))
+            should_save_step = ((every_n_train_steps > 0) and (global_step % every_n_train_steps == 0))
+            if should_save_step:
+                if _is_rank_zero(rank):
+                    logger.info(
+                        "Saving step checkpoint at epoch=%s batch=%s global_step=%s",
+                        epoch,
+                        step_idx,
+                        global_step,
+                    )
+                    _save_checkpoint(
+                        output_dir=output_dir,
+                        model=model_module,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        batch_idx=step_idx,
+                        global_step=global_step,
+                        val_loss=None,
+                        config_dict=config_dict,
+                        scheduler_cfgs=scheduler_cfgs,
+                        ckpt_cfg=ckpt_cfg,
+                        best_k=best_k,
+                        best_metric=best_val,
+                    )
+
+                if distributed:
+                    dist.barrier()
 
             lr = optimizer.param_groups[0]['lr']
 
@@ -431,6 +483,8 @@ def fit(
                     output_dir=output_dir,
                     model=model_module,
                     optimizer=optimizer,
+                    batch_idx=-1,
+                    global_step=global_step,
                     epoch=epoch,
                     val_loss=val_loss,
                     config_dict=config_dict,
