@@ -17,6 +17,9 @@ from mattergen.common.utils import distributed as ddp_utils
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
 from mattergen.diffusion.model_module import DiffusionModelModule
+from mattergen.common.loss import MaterialsLoss
+
+
 from mattergen.diffusion.training_components import (
     calc_loss,
 )
@@ -364,7 +367,7 @@ def fit(
             optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                loss, _metrics = calc_loss(model.module, batch) if distributed else calc_loss(model, batch)
+                loss, _metrics = model(batch)
 
             if scaler.is_enabled():
                 scaler.scale(loss).backward()

@@ -3,10 +3,10 @@
 #SBATCH -J HydraGNN
 #SBATCH -o mattergen-%j.out
 #SBATCH -e mattergen-%j.out
-#SBATCH -t 00:15:00
+#SBATCH -t 01:00:00
 #SBATCH -p batch 
 #SBATCH -q debug
-#SBATCH -N 8 # 128  
+#SBATCH -N 32 # 128  
 #SBATCH --ntasks-per-node=8
 
 CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/jaime/mattergen
@@ -42,6 +42,9 @@ export HYDRAGNN_AGGR_BACKEND=mpi
 export HYDRAGNN_VALTEST=1
 export HYDRA_FULL_ERROR=1
 
+# patxi - 07202026 - somehow empirically observed that
+#         cannot restart from a checkpoint without this nodes>64
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 ## Getting error without these after 20 nodes
 # export NCCL_P2P_LEVEL=NVL

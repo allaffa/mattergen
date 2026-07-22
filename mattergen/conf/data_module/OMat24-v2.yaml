@@ -23,8 +23,8 @@ transforms:
   _partial_: true
 
 average_density: 0.0500000 # atoms/Angstrom**3
-root_dir: /lustre/orion/world-shared/lrn070/jyc/frontier/dataset_sc26_restripe/OMat24-v2.bp # this is big omat
-#root_dir: /lustre/orion/lrn070/proj-shared/patxi/adios/data/miniOMat24-forces/miniOMat24-forces.bp
+#root_dir: /lustre/orion/world-shared/lrn070/jyc/frontier/dataset_sc26_restripe/OMat24-v2.bp # this is big omat
+root_dir: /lustre/orion/lrn070/proj-shared/patxi/adios/data/miniOMat24-forces/miniOMat24-forces-85k.bp
 
 train_dataset:
   _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
