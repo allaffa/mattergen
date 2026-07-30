@@ -61,6 +61,13 @@ pip_retry() {
 
 banner "MatterGen ROCm 7.13 environment setup started ($(date))"
 
+# Clear any conda environment inherited from the launching shell. Otherwise the
+# miniforge module's deactivate hook runs `conda deactivate` in this
+# non-interactive shell and fails ("Run 'conda init' before 'conda deactivate'"),
+# which aborts the script under `set -e`.
+unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE \
+      CONDA_PROMPT_MODIFIER 2>/dev/null || true
+
 # ----------------------------------------------------------------------------
 banner "Configure module stack (ROCm 7.13.0)"
 # ----------------------------------------------------------------------------
@@ -128,6 +135,22 @@ PY
 banner "Install PyTorch-Geometric stack"
 # ----------------------------------------------------------------------------
 if [[ "$BUILD_PYG_FROM_SOURCE" == "1" ]]; then
+  subbanner "Removing prebuilt PyG wheels (ABI-incompatible with torch 2.11+rocm7.13)"
+  # The prebuilt gfx90a wheels — especially pyg_lib — are linked against a
+  # different libtorch ABI and fail to load with:
+  #   libpyg.so: undefined symbol: _ZNK5torch8autograd4Node4nameEv
+  # torch_sparse.typing does `import pyg_lib` and only catches ImportError, so
+  # the leftover broken pyg_lib turns into a hard OSError. Uninstall the whole
+  # prebuilt set (both plain and -rocm names) before rebuilding from source.
+  # pyg_lib is intentionally NOT rebuilt/reinstalled: torch_geometric and the
+  # source-built torch_sparse work without it (accelerated sampling ops only).
+  python -m pip uninstall -y \
+    pyg-lib pyg-lib-rocm \
+    torch-scatter torch-scatter-rocm \
+    torch-sparse torch-sparse-rocm \
+    torch-cluster torch-cluster-rocm \
+    torch-spline-conv torch-spline-conv-rocm 2>/dev/null || true
+
   subbanner "Building torch-scatter/sparse/cluster/spline-conv from ROCm forks"
   PYG_FRONTIER="${INSTALL_ROOT}/PyTorch-Geometric-${ROCM_MM}"
   mkdir -p "$PYG_FRONTIER"; cd "$PYG_FRONTIER"
@@ -138,8 +161,8 @@ if [[ "$BUILD_PYG_FROM_SOURCE" == "1" ]]; then
     pushd "$name" >/dev/null
     git fetch --all; git checkout "$ref"; git submodule update --init --recursive
     rm -rf build
-    CC=gcc CXX=g++ python setup.py build
-    CC=gcc CXX=g++ python setup.py install
+    CC=gcc CXX=g++ PYTORCH_ROCM_ARCH=gfx90a FORCE_CUDA=1 python setup.py build
+    CC=gcc CXX=g++ PYTORCH_ROCM_ARCH=gfx90a FORCE_CUDA=1 python setup.py install
     popd >/dev/null
   }
   build_pyg pytorch_scatter      https://github.com/Looong01/pytorch_scatter-rocm.git 9799c51
