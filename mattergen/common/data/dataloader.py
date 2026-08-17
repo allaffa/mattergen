@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from mattergen.common.data.collate import collate
+from mattergen.common.data.node_budget_sampler import DistributedNodeBudgetBatchSampler
 
 
 def worker_init_fn(id: int):
@@ -39,7 +40,10 @@ def build_split_dataloader(
     *,
     distributed: bool,
     shuffle: bool,
-) -> tuple[DataLoader | None, DistributedSampler | None]:
+) -> tuple[
+    DataLoader | None,
+    DistributedSampler | DistributedNodeBudgetBatchSampler | None,
+]:
     dataset = getattr(datamodule, _split_attr(split), None)
     if dataset is None:
         loader_method = getattr(datamodule, f"{split}_dataloader", None)
@@ -55,6 +59,32 @@ def build_split_dataloader(
     num_workers_cfg = getattr(datamodule, "num_workers")
     batch_size = int(getattr(batch_size_cfg, split))
     num_workers = int(getattr(num_workers_cfg, split))
+
+    node_budget_cfg = getattr(datamodule, "node_budget_batching", None)
+    use_node_budget = (
+        split == "train"
+        and node_budget_cfg is not None
+        and bool(node_budget_cfg.get("enabled", False))
+    )
+    if use_node_budget:
+        sampler = DistributedNodeBudgetBatchSampler.from_dataset(
+            dataset,
+            target_node_count=int(node_budget_cfg.target_node_count),
+            node_budget=int(node_budget_cfg.node_budget),
+            chunk_size=int(node_budget_cfg.get("chunk_size", 32)),
+            forward_window=int(node_budget_cfg.get("forward_window", 0)),
+        )
+        loader = DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            num_workers=num_workers,
+            worker_init_fn=worker_init_fn,
+            collate_fn=collate,
+            persistent_workers=bool(
+                num_workers > 0 and node_budget_cfg.get("persistent_workers", True)
+            ),
+        )
+        return loader, sampler
 
     sampler = None
     dataloader_shuffle = shuffle

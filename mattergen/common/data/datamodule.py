@@ -14,12 +14,14 @@ class CrystDataModule:
         train_dataset: CrystalDataset,
         num_workers: DictConfig,
         batch_size: DictConfig,
+        node_budget_batching: DictConfig | None = None,
         val_dataset: CrystalDataset | None = None,
         test_dataset: CrystalDataset | None = None,
         **_,
     ):
         self.num_workers = num_workers
         self.batch_size = batch_size
+        self.node_budget_batching = node_budget_batching
 
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset

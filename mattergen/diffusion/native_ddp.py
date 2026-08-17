@@ -12,6 +12,7 @@ from omegaconf import DictConfig
 import yaml
 
 from mattergen.common.data.dataloader import build_split_dataloader
+from mattergen.common.data.node_budget_sampler import DistributedNodeBudgetBatchSampler
 from mattergen.common.data.property_scalers import compute_property_scalers
 from mattergen.common.utils import distributed as ddp_utils
 from mattergen.diffusion.data.batched_data import BatchedData
@@ -336,6 +337,14 @@ def fit(
     start_epoch = 0
     resume_batch_idx = 0
     global_step = 0
+    if (
+        isinstance(train_sampler, DistributedNodeBudgetBatchSampler)
+        and ckpt_path is not None
+    ):
+        raise NotImplementedError(
+            "Checkpoint resume is not supported by the node-budget sampler prototype; "
+            "its rollover and logical-stream state are in-memory only."
+        )
     if ckpt_path is not None:
         start_epoch, resume_batch_idx, global_step, loaded_best = _load_checkpoint(
             ckpt_path,
@@ -358,9 +367,27 @@ def fit(
         model.train()
         train_loss_sum = 0.0
         train_steps = 0
-        for step_idx, batch in enumerate(train_loader):
+        train_iterator = iter(train_loader)
+        step_idx = 0
+        while True:
+            try:
+                batch = next(train_iterator)
+                local_has_batch = True
+            except StopIteration:
+                batch = None
+                local_has_batch = False
+
+            if isinstance(train_sampler, DistributedNodeBudgetBatchSampler):
+                if not train_sampler.sync_batch_available(local_has_batch):
+                    break
+            elif not local_has_batch:
+                break
+
             # Makes sure we skip to right batch when starting from checkpoint
             if epoch == start_epoch and step_idx < resume_batch_idx:
+                if isinstance(train_sampler, DistributedNodeBudgetBatchSampler):
+                    train_sampler.mark_batch_consumed()
+                step_idx += 1
                 continue
             
             batch = _to_device(batch, device)
@@ -381,6 +408,9 @@ def fit(
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
                 optimizer.step()
+
+            if isinstance(train_sampler, DistributedNodeBudgetBatchSampler):
+                train_sampler.mark_batch_consumed()
 
             _step_schedulers(scheduler_cfgs, when="step")
             reduced_loss = _mean_reduce(loss.detach(), distributed)
@@ -432,6 +462,10 @@ def fit(
                 )
                 if wandb_run is not None:
                     wandb_run.log({"loss_train_step": float(reduced_loss.item()), "epoch": epoch})
+
+            step_idx += 1
+
+        del train_iterator
 
         avg_train = train_loss_sum / max(train_steps, 1)
         val_loss = None

@@ -1,8 +1,11 @@
-import torch
-from torch.utils.data import Dataset
-from mattergen.common.data.chemgraph import ChemGraph
+import os
+
 import adios2
 import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+from mattergen.common.data.chemgraph import ChemGraph
 
 # this is terrible but trying to load twice will make it work...
 try:    
@@ -18,6 +21,7 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
         self.property_names = set(properties or [])
 
         super().__init__(*args, **kwargs)
+        self.node_count_variable = f"{self.label}/natoms"
         """
         Parameters for AdiosDataset
         ----------
@@ -38,6 +42,16 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
         ddstore: bool, optional
             Option to use Distributed Data Store
         """
+
+    def read_node_counts(self, start, count):
+        """Read node counts through HydraGNN's persistent ADIOS stream."""
+
+        return self.f.read(
+            self.node_count_variable,
+            [int(start)],
+            [int(count)],
+        )
+
     def __getitem__(self, idx) -> ChemGraph:
 
         # just use the parent class get method
@@ -94,11 +108,11 @@ class LazyAdiosCrystalDataset(Dataset):
     DataLoader then calls __getitem__(idx), and that is where we lazy-read
     just the one structure requested.
 
-    Note: this is a simple implementation to demonstrate the idea. It opens
-    and closes the ADIOS file on every sample, which is probably not the most
-    efficient way to do it. A more efficient version would keep one reader open
-    per worker process, but that is more complex to implement.
+    The ADIOS ``FileReader`` is opened lazily and retained per process. This
+    avoids reopening the BP file for every sample while remaining safe when a
+    DataLoader creates worker processes.
     """
+
     def __init__(self, path, split, properties=None, transforms=None):
         # Path is location of file
         self.path = path
@@ -107,13 +121,56 @@ class LazyAdiosCrystalDataset(Dataset):
         # Save properties and transforms
         self.property_names = properties or []
         self.transforms = transforms
+        self.node_count_variable = f"{self.split}/natoms"
+        self._reader = None
+        self._reader_pid = None
         # Open once here only to read metadata and find the size
         with adios2.FileReader(self.path) as reader:
-            self.n_samples = int(reader.available_variables()[f"{self.split}/natoms"]["Shape"])
+            self.n_samples = int(
+                reader.available_variables()[self.node_count_variable]["Shape"]
+            )
 
     def __len__(self):
         # DistributedSampler uses this to know valid indices are 0..n_samples-1.
         return self.n_samples
+
+    def _get_reader(self):
+        """Return one persistent ADIOS reader per process."""
+
+        pid = os.getpid()
+        if self._reader is None or self._reader_pid != pid:
+            self.close()
+            self._reader = adios2.FileReader(self.path)
+            self._reader_pid = pid
+        return self._reader
+
+    def read_node_counts(self, start, count):
+        """Read a contiguous count slice for node-budget batching."""
+
+        return self._get_reader().read(
+            self.node_count_variable,
+            start=[int(start)],
+            count=[int(count)],
+            step_selection=[0, 1],
+        )
+
+    def close(self):
+        if self._reader is not None:
+            self._reader.close()
+        self._reader = None
+        self._reader_pid = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_reader"] = None
+        state["_reader_pid"] = None
+        return state
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
     
     def _read_scalar_sample(self, reader, name, idx):
         """Read one value from a dense per-sample array, like natoms."""
@@ -159,22 +216,25 @@ class LazyAdiosCrystalDataset(Dataset):
         # ADIOS wants plain ints.
         idx = int(idx)
 
-        # Open reader per sample (probably not the most efficient)
-        with adios2.FileReader(self.path) as reader:
-            # Get number of atoms in the structure
-            natoms = self._read_scalar_sample(reader, f"{self.split}/natoms", idx)
+        reader = self._get_reader()
+        # Get number of atoms in the structure
+        natoms = self._read_scalar_sample(reader, f"{self.split}/natoms", idx)
 
-            # Get the atomic numbers of the atoms in the structure 
-            atomic_numbers = self._read_ragged_sample(reader, f"{self.split}/atomic_numbers", idx, width=1).reshape(-1)
+        # Get the atomic numbers of the atoms in the structure
+        atomic_numbers = self._read_ragged_sample(
+            reader, f"{self.split}/atomic_numbers", idx, width=1
+        ).reshape(-1)
 
-            # Get the positions of the atoms in the structure
-            pos = self._read_ragged_sample(reader, f"{self.split}/pos", idx, width=3)
+        # Get the positions of the atoms in the structure
+        pos = self._read_ragged_sample(reader, f"{self.split}/pos", idx, width=3)
 
-            # Cell is stored as 3 rows of width 3 per structure.
-            cell = self._read_ragged_sample(reader, f"{self.split}/cell", idx, width=3).reshape(3, 3)
+        # Cell is stored as 3 rows of width 3 per structure.
+        cell = self._read_ragged_sample(
+            reader, f"{self.split}/cell", idx, width=3
+        ).reshape(3, 3)
 
-            # Get all the requested properties
-            props = self._read_properties(reader, idx)
+        # Get all the requested properties
+        props = self._read_properties(reader, idx)
 
         # Make the chemgraph
         data = ChemGraph(
