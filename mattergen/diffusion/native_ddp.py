@@ -8,19 +8,17 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from omegaconf import DictConfig
 import yaml
+from omegaconf import DictConfig
 
 from mattergen.common.data.dataloader import build_split_dataloader
 from mattergen.common.data.node_budget_sampler import DistributedNodeBudgetBatchSampler
 from mattergen.common.data.property_scalers import compute_property_scalers
+from mattergen.common.loss import MaterialsLoss
 from mattergen.common.utils import distributed as ddp_utils
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
 from mattergen.diffusion.model_module import DiffusionModelModule
-from mattergen.common.loss import MaterialsLoss
-
-
 from mattergen.diffusion.training_components import (
     calc_loss,
 )
@@ -449,19 +447,28 @@ def fit(
 
             lr = optimizer.param_groups[0]['lr']
 
-            if _is_rank_zero(rank) and step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0:
-                logger.info(
-                    "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
-                    epoch,
-                    step_idx,
-                    lr,
-                    float(reduced_loss.item()),
-                    float(_metrics['pos'].item()),
-                    float(_metrics['cell'].item()),
-                    float(_metrics['atomic_numbers'].item()),
+            should_log = step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0
+            if should_log:
+                metric_keys = ("pos", "cell", "atomic_numbers")
+                reduced_metric_values = _mean_reduce(
+                    torch.stack([_metrics[key].detach() for key in metric_keys]),
+                    distributed,
                 )
-                if wandb_run is not None:
-                    wandb_run.log({"loss_train_step": float(reduced_loss.item()), "epoch": epoch})
+                reduced_metrics = dict(zip(metric_keys, reduced_metric_values))
+
+                if _is_rank_zero(rank):
+                    logger.info(
+                        "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
+                        epoch,
+                        step_idx,
+                        lr,
+                        float(reduced_loss.item()),
+                        float(reduced_metrics['pos'].item()),
+                        float(reduced_metrics['cell'].item()),
+                        float(reduced_metrics['atomic_numbers'].item()),
+                    )
+                    if wandb_run is not None:
+                        wandb_run.log({"loss_train_step": float(reduced_loss.item()), "epoch": epoch})
 
             step_idx += 1
 

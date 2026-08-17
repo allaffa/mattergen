@@ -123,6 +123,23 @@ class SummedFieldLoss(Loss[T]):
                 scalar_loss_per_field,
             )
 
+        if self.reduce == "sum":
+            loss_device = next(iter(loss_per_sample_per_field.values())).device
+            global_structure_count = _distributed_sum(
+                torch.tensor(batch.get_batch_size(), device=loss_device)
+            )
+            if global_structure_count.item() <= 0:
+                raise ValueError("sum reduction requires a batch with at least one structure.")
+            world_size = _world_size()
+            scalar_loss_per_field = {
+                k: v.sum() * world_size / global_structure_count
+                for k, v in loss_per_sample_per_field.items()
+            }
+            agg_loss = torch.stack(
+                [self.loss_weights[k] * v for k, v in scalar_loss_per_field.items()], dim=0
+            ).sum()
+            return agg_loss, scalar_loss_per_field
+
         # Aggregate losses per field over samples.
         scalar_loss_per_field = {k: v.mean() for k, v in loss_per_sample_per_field.items()}
 
