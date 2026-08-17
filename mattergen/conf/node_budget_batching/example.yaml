@@ -1,0 +1,47 @@
+# @package data_module.node_budget_batching
+
+# Opt-in example for packing each training batch around a total atom count.
+# Enable it with:
+#
+#   mattergen-train +node_budget_batching=example checkpoint_path=null
+#
+# This configuration affects the training loader only. Validation and test
+# loaders continue to use their fixed `data_module.batch_size.val` and
+# `data_module.batch_size.test` settings.
+
+# Turn atom-budget batch construction on. Set this to false to fall back to
+# the fixed number of structures in `data_module.batch_size.train`.
+enabled: true
+
+# Soft packing target: the sampler tries to make each training batch contain
+# approximately this many atoms. It may stop below or above the target while
+# searching for the closest valid packing, but it never exceeds node_budget.
+#
+# This 1,469-atom value targets roughly 75% of the VRAM on the measured 48 GB
+# NVIDIA RTX A6000 workload. Recalibrate it for other models and hardware.
+target_node_count: 1469
+
+# Hard per-batch atom cap. A structure that individually exceeds this value
+# cannot fit in any batch, so the sampler drops it and emits a warning.
+#
+# This 1,554-atom value targets roughly 80% of VRAM using the worst observed
+# positive residual from the A6000 memory fit. The 1,469/1,554 pair was
+# derived from measurements but was not directly benchmarked as a pair.
+node_budget: 1554
+
+# Number of contiguous atom-count metadata entries read at a time. Larger
+# chunks reduce metadata read calls and give the packer more nearby candidates
+# at the cost of additional lookahead work.
+chunk_size: 32
+
+# Number of extra metadata chunks searched after reaching the soft target.
+# Zero favors predictable overhead; larger values may find a closer packing.
+forward_window: 0
+
+# Keep DataLoader worker processes alive between epochs. This is used only
+# when `data_module.num_workers.train` is greater than zero.
+persistent_workers: true
+
+# Checkpoint resume is currently unsupported for the node-budget sampler
+# because its rollover/logical-stream state is not serialized. Start these
+# runs with `checkpoint_path=null` as shown above.
