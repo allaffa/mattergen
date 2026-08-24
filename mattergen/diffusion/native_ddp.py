@@ -17,11 +17,78 @@ from mattergen.common.utils import distributed as ddp_utils
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
 from mattergen.diffusion.model_module import DiffusionModelModule
+from mattergen.common.loss import MaterialsLoss
+
+
 from mattergen.diffusion.training_components import (
     calc_loss,
 )
 
 logger = logging.getLogger(__name__)
+
+def _rank_prefix(rank: int) -> str:
+    return f"[rank={rank} host={os.uname().nodename}]"
+
+def _selected_rank(rank: int, world_size: int) -> bool:
+    # Keep logging volume under control.
+    return rank in {0, 1, world_size - 1}
+
+def _first_param_stats(module: torch.nn.Module) -> tuple[str, float, float]:
+    for name, p in module.named_parameters():
+        data = p.detach().float()
+        return name, float(data.mean().item()), float(data.norm().item())
+    return "<no-params>", 0.0, 0.0
+
+def _model_checksum(module: torch.nn.Module) -> torch.Tensor:
+    # Cheap scalar checksum for comparing parameters across ranks.
+    device = next(module.parameters()).device
+    s = torch.zeros(1, device=device, dtype=torch.float64)
+    for p in module.parameters():
+        s += p.detach().double().sum()
+    return s
+
+def _grad_checksum(module: torch.nn.Module) -> torch.Tensor:
+    device = next(module.parameters()).device
+    s = torch.zeros(1, device=device, dtype=torch.float64)
+    for p in module.parameters():
+        if p.grad is not None:
+            s += p.grad.detach().double().sum()
+    return s
+
+def _grad_l2_norm(module: torch.nn.Module) -> float:
+    total = 0.0
+    for p in module.parameters():
+        if p.grad is not None:
+            g = p.grad.detach().float()
+            total += float(torch.sum(g * g).item())
+    return total ** 0.5
+
+def _log_model_sync(module: torch.nn.Module, rank: int, world_size: int, tag: str) -> None:
+    checksum = _model_checksum(module)
+    gathered = [torch.zeros_like(checksum) for _ in range(world_size)]
+    dist.all_gather(gathered, checksum)
+    values = [float(x.item()) for x in gathered]
+    if _selected_rank(rank, world_size):
+        logger.info("%s %s model checksums across ranks: %s", _rank_prefix(rank), tag, values[:8] + (["..."] if len(values) > 8 else []))
+
+def _log_grad_sync(module: torch.nn.Module, rank: int, world_size: int, tag: str) -> None:
+    checksum = _grad_checksum(module)
+    gathered = [torch.zeros_like(checksum) for _ in range(world_size)]
+    dist.all_gather(gathered, checksum)
+    values = [float(x.item()) for x in gathered]
+    if _selected_rank(rank, world_size):
+        logger.info("%s %s grad checksums across ranks: %s", _rank_prefix(rank), tag, values[:8] + (["..."] if len(values) > 8 else []))
+
+def _ddp_collective_sanity(device: torch.device, rank: int, world_size: int) -> None:
+    x = torch.tensor([float(rank)], device=device)
+    dist.all_reduce(x, op=dist.ReduceOp.SUM)
+    expected = world_size * (world_size - 1) / 2.0
+    logger.info(
+        "%s collective sanity: all_reduce(sum(rank))=%.1f expected=%.1f",
+        _rank_prefix(rank),
+        float(x.item()),
+        expected,
+    )
 
 
 def _is_rank_zero(rank: int) -> bool:
@@ -86,6 +153,7 @@ def _extract_checkpoint_cfg(trainer_cfg: DictConfig) -> dict[str, Any]:
             "save_top_k": int(checkpoint_cfg.get("save_top_k", 1)),
             "save_last": bool(checkpoint_cfg.get("save_last", True)),
             "every_n_epochs": int(checkpoint_cfg.get("every_n_epochs", 1)),
+            "every_n_train_steps": int(checkpoint_cfg.get("every_n_train_steps", 0)),
             "filename": checkpoint_cfg.get("filename", "{epoch}-{loss_val:.2f}"),
         }
 
@@ -99,6 +167,7 @@ def _extract_checkpoint_cfg(trainer_cfg: DictConfig) -> dict[str, Any]:
                 "save_top_k": int(callback_cfg.get("save_top_k", 1)),
                 "save_last": bool(callback_cfg.get("save_last", True)),
                 "every_n_epochs": int(callback_cfg.get("every_n_epochs", 1)),
+                "every_n_train_steps": int(callback_cfg.get("every_n_train_steps", 0)),
                 "filename": callback_cfg.get("filename", "{epoch}-{loss_val:.2f}"),
             }
     return {
@@ -107,6 +176,7 @@ def _extract_checkpoint_cfg(trainer_cfg: DictConfig) -> dict[str, Any]:
         "save_top_k": 1,
         "save_last": True,
         "every_n_epochs": 1,
+        "every_n_train_steps": 0,
         "filename": "{epoch}-{loss_val:.2f}",
     }
 
@@ -152,7 +222,7 @@ def _load_checkpoint(
     model_module: DiffusionModelModule[BatchedData],
     optimizer: torch.optim.Optimizer,
     scheduler_cfgs: list[dict[str, Any]],
-) -> tuple[int, float | None]:
+) -> tuple[int, int, int, float | None]:
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     model_module.load_state_dict(checkpoint["state_dict"], strict=True)
 
@@ -164,9 +234,17 @@ def _load_checkpoint(
     for scheduler_cfg, scheduler_state in zip(scheduler_cfgs, scheduler_states):
         scheduler_cfg["scheduler"].load_state_dict(scheduler_state)
 
-    next_epoch = int(checkpoint.get("epoch", -1)) + 1
+    saved_epoch = int(checkpoint.get("epoch", -1))
+    saved_batch_idx = int(checkpoint.get("batch_idx",-1))
+    if saved_batch_idx >= 0:
+        start_epoch = saved_epoch
+        next_batch_idx = saved_batch_idx + 1
+    else:
+        start_epoch = saved_epoch + 1
+        next_batch_idx = 0
+    global_step = max(0,int(checkpoint.get("global_step",0)))
     best_metric = checkpoint.get("best_metric")
-    return next_epoch, best_metric
+    return start_epoch, next_batch_idx, global_step, best_metric
 
 
 def _save_config_yaml(config_dict: dict[str, Any], output_dir: Path) -> None:
@@ -181,6 +259,8 @@ def _save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
+    batch_idx: int,
+    global_step: int,
     val_loss: float | None,
     config_dict: dict[str, Any],
     scheduler_cfgs: list[dict[str, Any]],
@@ -194,6 +274,8 @@ def _save_checkpoint(
     metric_value = val_loss
     ckpt_payload = {
         "epoch": epoch,
+        "batch_idx": batch_idx,
+        "global_step": global_step,
         "state_dict": model.state_dict(),
         "optimizer_states": [optimizer.state_dict()],
         "scheduler_states": [cfg["scheduler"].state_dict() for cfg in scheduler_cfgs],
@@ -244,6 +326,9 @@ def fit(
     distributed = world_size > 1
     local_rank = ddp_utils.get_local_rank() if distributed else None
 
+    if distributed:
+        logger.info("%s world_size=%s local_rank=%s", _rank_prefix(rank), world_size, local_rank)
+
     if rank == 0:
         logger.info("DDP setup: %s", ddp_utils.hostname_port_summary())
 
@@ -251,6 +336,17 @@ def fit(
     model_module = model_module.to(device)
     diffusion_module = model_module.diffusion_module
     model = diffusion_module
+
+    first_name, first_mean, first_norm = _first_param_stats(model)
+    logger.info(
+        "%s pre-DDP first param: %s mean=%.6e norm=%.6e device=%s",
+        _rank_prefix(rank),
+        first_name,
+        first_mean,
+        first_norm,
+        device,
+    )
+
 
     if native_cfg.get("set_property_scalers", True):
         compute_property_scalers(datamodule=datamodule, property_embeddings=model.model.property_embeddings)
@@ -268,6 +364,12 @@ def fit(
         static_graph=bool(native_cfg.get("static_graph", False)),
         gradient_as_bucket_view=bool(native_cfg.get("gradient_as_bucket_view", True)),
     )
+
+    if distributed:
+        dist.barrier()
+        _ddp_collective_sanity(device, rank, world_size)
+        _log_model_sync(model.module, rank, world_size, tag="after_ddp_wrap")
+
 
     optimizer, scheduler_cfgs = _parse_optimizers(model_module.configure_optimizers())
 
@@ -316,8 +418,10 @@ def fit(
 
     best_val = float("inf")
     start_epoch = 0
+    resume_batch_idx = 0
+    global_step = 0
     if ckpt_path is not None:
-        start_epoch, loaded_best = _load_checkpoint(
+        start_epoch, resume_batch_idx, global_step, loaded_best = _load_checkpoint(
             ckpt_path,
             model_module=model_module,
             optimizer=optimizer,
@@ -326,7 +430,8 @@ def fit(
         if loaded_best is not None:
             best_val = float(loaded_best)
         if _is_rank_zero(rank):
-            logger.info("Resumed native training from %s at epoch=%s", ckpt_path, start_epoch)
+            logger.info("Resumed native training from %s at epoch=%s batch=%s global_step=%s", 
+                        ckpt_path, start_epoch, resume_batch_idx, global_step,)
 
     best_k: list[tuple[float, Path]] = []
 
@@ -338,29 +443,129 @@ def fit(
         train_loss_sum = 0.0
         train_steps = 0
         for step_idx, batch in enumerate(train_loader):
+            # Makes sure we skip to right batch when starting from checkpoint
+            if epoch == start_epoch and step_idx < resume_batch_idx:
+                continue
+            
             batch = _to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                loss, _metrics = calc_loss(model.module, batch) if distributed else calc_loss(model, batch)
+                loss, _metrics = model(batch)
+
+            debug_ddp = bool(native_cfg.get("debug_ddp", False))
+            debug_steps = int(native_cfg.get("debug_ddp_steps", 2))
+
+            if debug_ddp and step_idx < debug_steps:
+                finite_loss = torch.isfinite(loss.detach()).item()
+                logger.info("%s epoch=%s step=%s finite_loss=%s", _rank_prefix(rank), epoch, step_idx, finite_loss)
+
+
+            if debug_ddp and step_idx < debug_steps:
+                logger.info(
+                    "%s epoch=%s step=%s local_loss=%.6f",
+                    _rank_prefix(rank),
+                    epoch,
+                    step_idx,
+                    float(loss.detach().item()),
+                )
+
 
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+
+                if debug_ddp and step_idx < debug_steps:
+                    grad_norm = _grad_l2_norm(model.module if distributed else model)
+                    logger.info(
+                        "%s epoch=%s step=%s grad_norm_after_backward=%.6e",
+                        _rank_prefix(rank),
+                        epoch,
+                        step_idx,
+                        grad_norm,
+                    )
+                    if distributed:
+                        _log_grad_sync(model.module, rank, world_size, tag=f"epoch={epoch}_step={step_idx}")
+
                 if grad_clip > 0:
-                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
+
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+
+                if debug_ddp and step_idx < debug_steps:
+                    grad_norm = _grad_l2_norm(model.module if distributed else model)
+                    logger.info(
+                        "%s epoch=%s step=%s grad_norm_after_backward=%.6e",
+                        _rank_prefix(rank),
+                        epoch,
+                        step_idx,
+                        grad_norm,
+                    )
+                    if distributed:
+                        _log_grad_sync(model.module, rank, world_size, tag=f"epoch={epoch}_step={step_idx}")
+
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
+
                 optimizer.step()
+
+                if debug_ddp and distributed and step_idx < debug_steps:
+                    _log_model_sync(model.module, rank, world_size, tag=f"post_step_epoch={epoch}_step={step_idx}")
+
+
+            for name, p in (model.module if distributed else model).named_parameters():
+                if p.grad is not None and not torch.isfinite(p.grad).all():
+                    logger.warning("%s non-finite grad in %s", _rank_prefix(rank), name)
+                    break
+
 
             _step_schedulers(scheduler_cfgs, when="step")
             reduced_loss = _mean_reduce(loss.detach(), distributed)
+            if debug_ddp and step_idx < debug_steps:
+                logger.info(
+                    "%s epoch=%s step=%s local_loss=%.6f reduced_loss=%.6f",
+                    _rank_prefix(rank),
+                    epoch,
+                    step_idx,
+                    float(loss.detach().item()),
+                    float(reduced_loss.item()),
+                )
+
             train_loss_sum += float(reduced_loss.item())
             train_steps += 1
+
+            # Increment global step and save if required
+            global_step += 1
+            every_n_train_steps = int(ckpt_cfg.get("every_n_train_steps", 0))
+            should_save_step = ((every_n_train_steps > 0) and (global_step % every_n_train_steps == 0))
+            if should_save_step:
+                if _is_rank_zero(rank):
+                    logger.info(
+                        "Saving step checkpoint at epoch=%s batch=%s global_step=%s",
+                        epoch,
+                        step_idx,
+                        global_step,
+                    )
+                    _save_checkpoint(
+                        output_dir=output_dir,
+                        model=model_module,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        batch_idx=step_idx,
+                        global_step=global_step,
+                        val_loss=None,
+                        config_dict=config_dict,
+                        scheduler_cfgs=scheduler_cfgs,
+                        ckpt_cfg=ckpt_cfg,
+                        best_k=best_k,
+                        best_metric=best_val,
+                    )
+
+                if distributed:
+                    dist.barrier()
 
             lr = optimizer.param_groups[0]['lr']
 
@@ -431,6 +636,8 @@ def fit(
                     output_dir=output_dir,
                     model=model_module,
                     optimizer=optimizer,
+                    batch_idx=-1,
+                    global_step=global_step,
                     epoch=epoch,
                     val_loss=val_loss,
                     config_dict=config_dict,

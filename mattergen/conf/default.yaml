@@ -3,7 +3,7 @@ hydra:
     dir: ${oc.env:OUTPUT_DIR,outputs/singlerun/${now:%Y-%m-%d}/${now:%H-%M-%S}}
 
 auto_resume: False
-#checkpoint_path: /lustre/orion/lrn070/proj-shared/patxi/adiosdataset/mattergen/outputs/singlerun/2026-07-06/04-00-55/checkpoints/last.ckpt
+#checkpoint_path: /lustre/orion/lrn070/proj-shared/patxi/jaime/mattergen/outputs/singlerun/2026-07-21/11-46-34/checkpoints/last.ckpt
 trainer_backend: native_ddp
 
 defaults:
