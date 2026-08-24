@@ -26,6 +26,70 @@ from mattergen.diffusion.training_components import (
 
 logger = logging.getLogger(__name__)
 
+def _rank_prefix(rank: int) -> str:
+    return f"[rank={rank} host={os.uname().nodename}]"
+
+def _selected_rank(rank: int, world_size: int) -> bool:
+    # Keep logging volume under control.
+    return rank in {0, 1, world_size - 1}
+
+def _first_param_stats(module: torch.nn.Module) -> tuple[str, float, float]:
+    for name, p in module.named_parameters():
+        data = p.detach().float()
+        return name, float(data.mean().item()), float(data.norm().item())
+    return "<no-params>", 0.0, 0.0
+
+def _model_checksum(module: torch.nn.Module) -> torch.Tensor:
+    # Cheap scalar checksum for comparing parameters across ranks.
+    device = next(module.parameters()).device
+    s = torch.zeros(1, device=device, dtype=torch.float64)
+    for p in module.parameters():
+        s += p.detach().double().sum()
+    return s
+
+def _grad_checksum(module: torch.nn.Module) -> torch.Tensor:
+    device = next(module.parameters()).device
+    s = torch.zeros(1, device=device, dtype=torch.float64)
+    for p in module.parameters():
+        if p.grad is not None:
+            s += p.grad.detach().double().sum()
+    return s
+
+def _grad_l2_norm(module: torch.nn.Module) -> float:
+    total = 0.0
+    for p in module.parameters():
+        if p.grad is not None:
+            g = p.grad.detach().float()
+            total += float(torch.sum(g * g).item())
+    return total ** 0.5
+
+def _log_model_sync(module: torch.nn.Module, rank: int, world_size: int, tag: str) -> None:
+    checksum = _model_checksum(module)
+    gathered = [torch.zeros_like(checksum) for _ in range(world_size)]
+    dist.all_gather(gathered, checksum)
+    values = [float(x.item()) for x in gathered]
+    if _selected_rank(rank, world_size):
+        logger.info("%s %s model checksums across ranks: %s", _rank_prefix(rank), tag, values[:8] + (["..."] if len(values) > 8 else []))
+
+def _log_grad_sync(module: torch.nn.Module, rank: int, world_size: int, tag: str) -> None:
+    checksum = _grad_checksum(module)
+    gathered = [torch.zeros_like(checksum) for _ in range(world_size)]
+    dist.all_gather(gathered, checksum)
+    values = [float(x.item()) for x in gathered]
+    if _selected_rank(rank, world_size):
+        logger.info("%s %s grad checksums across ranks: %s", _rank_prefix(rank), tag, values[:8] + (["..."] if len(values) > 8 else []))
+
+def _ddp_collective_sanity(device: torch.device, rank: int, world_size: int) -> None:
+    x = torch.tensor([float(rank)], device=device)
+    dist.all_reduce(x, op=dist.ReduceOp.SUM)
+    expected = world_size * (world_size - 1) / 2.0
+    logger.info(
+        "%s collective sanity: all_reduce(sum(rank))=%.1f expected=%.1f",
+        _rank_prefix(rank),
+        float(x.item()),
+        expected,
+    )
+
 
 def _is_rank_zero(rank: int) -> bool:
     return rank == 0
@@ -262,6 +326,9 @@ def fit(
     distributed = world_size > 1
     local_rank = ddp_utils.get_local_rank() if distributed else None
 
+    if distributed:
+        logger.info("%s world_size=%s local_rank=%s", _rank_prefix(rank), world_size, local_rank)
+
     if rank == 0:
         logger.info("DDP setup: %s", ddp_utils.hostname_port_summary())
 
@@ -269,6 +336,17 @@ def fit(
     model_module = model_module.to(device)
     diffusion_module = model_module.diffusion_module
     model = diffusion_module
+
+    first_name, first_mean, first_norm = _first_param_stats(model)
+    logger.info(
+        "%s pre-DDP first param: %s mean=%.6e norm=%.6e device=%s",
+        _rank_prefix(rank),
+        first_name,
+        first_mean,
+        first_norm,
+        device,
+    )
+
 
     if native_cfg.get("set_property_scalers", True):
         compute_property_scalers(datamodule=datamodule, property_embeddings=model.model.property_embeddings)
@@ -286,6 +364,12 @@ def fit(
         static_graph=bool(native_cfg.get("static_graph", False)),
         gradient_as_bucket_view=bool(native_cfg.get("gradient_as_bucket_view", True)),
     )
+
+    if distributed:
+        dist.barrier()
+        _ddp_collective_sanity(device, rank, world_size)
+        _log_model_sync(model.module, rank, world_size, tag="after_ddp_wrap")
+
 
     optimizer, scheduler_cfgs = _parse_optimizers(model_module.configure_optimizers())
 
@@ -369,21 +453,87 @@ def fit(
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 loss, _metrics = model(batch)
 
+            debug_ddp = bool(native_cfg.get("debug_ddp", False))
+            debug_steps = int(native_cfg.get("debug_ddp_steps", 2))
+
+            if debug_ddp and step_idx < debug_steps:
+                finite_loss = torch.isfinite(loss.detach()).item()
+                logger.info("%s epoch=%s step=%s finite_loss=%s", _rank_prefix(rank), epoch, step_idx, finite_loss)
+
+
+            if debug_ddp and step_idx < debug_steps:
+                logger.info(
+                    "%s epoch=%s step=%s local_loss=%.6f",
+                    _rank_prefix(rank),
+                    epoch,
+                    step_idx,
+                    float(loss.detach().item()),
+                )
+
+
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+
+                if debug_ddp and step_idx < debug_steps:
+                    grad_norm = _grad_l2_norm(model.module if distributed else model)
+                    logger.info(
+                        "%s epoch=%s step=%s grad_norm_after_backward=%.6e",
+                        _rank_prefix(rank),
+                        epoch,
+                        step_idx,
+                        grad_norm,
+                    )
+                    if distributed:
+                        _log_grad_sync(model.module, rank, world_size, tag=f"epoch={epoch}_step={step_idx}")
+
                 if grad_clip > 0:
-                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
+
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+
+                if debug_ddp and step_idx < debug_steps:
+                    grad_norm = _grad_l2_norm(model.module if distributed else model)
+                    logger.info(
+                        "%s epoch=%s step=%s grad_norm_after_backward=%.6e",
+                        _rank_prefix(rank),
+                        epoch,
+                        step_idx,
+                        grad_norm,
+                    )
+                    if distributed:
+                        _log_grad_sync(model.module, rank, world_size, tag=f"epoch={epoch}_step={step_idx}")
+
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
+
                 optimizer.step()
+
+                if debug_ddp and distributed and step_idx < debug_steps:
+                    _log_model_sync(model.module, rank, world_size, tag=f"post_step_epoch={epoch}_step={step_idx}")
+
+
+            for name, p in (model.module if distributed else model).named_parameters():
+                if p.grad is not None and not torch.isfinite(p.grad).all():
+                    logger.warning("%s non-finite grad in %s", _rank_prefix(rank), name)
+                    break
+
 
             _step_schedulers(scheduler_cfgs, when="step")
             reduced_loss = _mean_reduce(loss.detach(), distributed)
+            if debug_ddp and step_idx < debug_steps:
+                logger.info(
+                    "%s epoch=%s step=%s local_loss=%.6f reduced_loss=%.6f",
+                    _rank_prefix(rank),
+                    epoch,
+                    step_idx,
+                    float(loss.detach().item()),
+                    float(reduced_loss.item()),
+                )
+
             train_loss_sum += float(reduced_loss.item())
             train_steps += 1
 

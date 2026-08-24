@@ -415,3 +415,4 @@ FodyWeavers.xsd
 # Generated run outputs and caches
 outputs/singlerun/
 datasets/cache/
+jobOutputs/
