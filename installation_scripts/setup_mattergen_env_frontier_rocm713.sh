@@ -211,6 +211,224 @@ PY
 banner "Install MatterGen package (editable, no extra deps)"
 pip_retry -e "$REPO_ROOT" --no-deps
 
+
+
+# ============================================================
+# pymatgen reinstall from GitHub + verification
+# ============================================================
+banner "pymatgen reinstall from GitHub"
+
+subbanner "Remove existing pymatgen"
+python -m pip uninstall -y pymatgen || true
+
+subbanner "Remove any leftover pymatgen files from site-packages"
+python - <<'PY'
+import site
+import sys
+from pathlib import Path
+import shutil
+
+paths = []
+try:
+    paths.extend(site.getsitepackages())
+except Exception:
+    pass
+
+user_site = site.getusersitepackages()
+if user_site:
+    paths.append(user_site)
+
+seen = set()
+for p in paths:
+    if not p or p in seen:
+        continue
+    seen.add(p)
+    sp = Path(p)
+    if not sp.exists():
+        continue
+    for target in sp.glob("pymatgen*"):
+        print(f"Removing leftover: {target}")
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+PY
+
+subbanner "Install pymatgen from GitHub"
+python -m pip install --no-deps --no-cache-dir "git+https://github.com/materialsproject/pymatgen.git"
+
+subbanner "Verify pymatgen graph modules"
+python - <<'PY'
+import importlib.util
+import sys
+
+mods = [
+    "pymatgen",
+    "pymatgen.analysis.graphs",
+    "pymatgen.core.graphs",
+]
+
+failed = False
+for name in mods:
+    try:
+        spec = importlib.util.find_spec(name)
+        print(f"{name} -> {spec}")
+        if spec is not None:
+            print(f"  origin: {spec.origin}")
+        else:
+            failed = True
+    except Exception as e:
+        print(f"{name} -> ERROR: {e!r}")
+        failed = True
+
+print("\nImport test:")
+try:
+    from pymatgen.core.graphs import StructureGraph
+    print("pymatgen.core.graphs.StructureGraph -> OK", StructureGraph)
+except Exception as e:
+    print("core.graphs import failed:", repr(e))
+    failed = True
+
+try:
+    from pymatgen.analysis.graphs import StructureGraph as SG2
+    print("pymatgen.analysis.graphs.StructureGraph -> OK", SG2)
+except Exception as e:
+    print("analysis.graphs import failed:", repr(e))
+    failed = True
+
+if failed:
+    sys.exit("pymatgen verification failed")
+PY
+
+############################################################
+# mpi4py 3.1.5
+############################################################
+MPI4PY_FRONTIER="${INSTALL_ROOT}/MPI4PY-Frontier"
+export MPI4PY_FRONTIER
+mkdir -p "$MPI4PY_FRONTIER"
+cd "$MPI4PY_FRONTIER"
+
+if [[ ! -d mpi4py/.git ]]; then
+  git clone -b 3.1.5 https://github.com/mpi4py/mpi4py.git
+fi
+
+pushd mpi4py >/dev/null
+rm -rf build
+
+# keep setuptools<70 active in the venv for this build
+CC=cc MPICC=cc "$PYTHON_BIN" -m pip install . --no-build-isolation -v
+
+popd >/dev/null
+
+
+# ============================================================
+# ADIOS2
+# ============================================================
+banner "ADIOS2 (v2.10.2)"
+ADIOS2_FRONTIER="${INSTALL_ROOT}/ADIOS2-Frontier"
+export ADIOS2_FRONTIER
+mkdir -p "$ADIOS2_FRONTIER"
+cd "$ADIOS2_FRONTIER"
+
+if [[ ! -d ADIOS2/.git ]]; then
+  git clone -b v2.10.2 https://github.com/ornladios/ADIOS2.git
+fi
+
+mkdir -p adios2-build
+
+CC=cc CXX=CC FC=ftn \
+cmake -DCMAKE_INSTALL_PREFIX=$ENV_PATH \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF \
+    -DADIOS2_USE_MPI=ON \
+    -DADIOS2_USE_Fortran=OFF \
+    -DADIOS2_BUILD_EXAMPLES_EXPERIMENTAL=OFF \
+    -DADIOS2_BUILD_TESTING=OFF \
+    -DADIOS2_USE_HDF5=OFF \
+    -DADIOS2_USE_SST=OFF \
+    -DADIOS2_USE_BZip2=OFF \
+    -DADIOS2_USE_PNG=OFF \
+    -DADIOS2_USE_DataSpaces=OFF \
+    -DADIOS2_USE_Python=ON \
+    -DPython_EXECUTABLE=$(which python) \
+    -B adios2-build -S ADIOS2
+
+cmake --build adios2-build -j32
+cmake --install adios2_build 2>/dev/null || cmake --install adios2-build
+
+# ============================================================
+# DDStore
+# ============================================================
+banner "DDStore"
+DDSTORE_FRONTIER="${INSTALL_ROOT}/DDStore-Frontier"
+export DDSTORE_FRONTIER
+mkdir -p "$DDSTORE_FRONTIER"
+cd "$DDSTORE_FRONTIER"
+
+git clone git@github.com:ORNL/DDStore.git || true
+pushd DDStore >/dev/null
+CC=cc CXX=CC pip_retry . --no-build-isolation --verbose
+popd >/dev/null
+
+# ============================================================
+# DeepHyper
+# ============================================================
+banner "DeepHyper (develop branch)"
+DEEPHYPER_FRONTIER="${INSTALL_ROOT}/DeepHyperFrontier"
+export DEEPHYPER_FRONTIER
+mkdir -p "$DEEPHYPER_FRONTIER"
+cd "$DEEPHYPER_FRONTIER"
+
+git clone https://github.com/deephyper/deephyper.git || true
+cd deephyper
+git fetch origin develop
+git checkout develop
+pip_retry -e ".[hps,hps-tl]" --verbose
+assert_numpy_1264
+
+# ============================================================
+# GPTL
+# ============================================================
+banner "GPTL"
+GPTL_FRONTIER="${INSTALL_ROOT}/GPTLFrontier"
+export GPTL_FRONTIER
+mkdir -p "$GPTL_FRONTIER"
+cd "$GPTL_FRONTIER"
+
+wget https://github.com/jmrosinski/GPTL/releases/download/v8.1.1/gptl-8.1.1.tar.gz
+tar xvf gptl-8.1.1.tar.gz
+pushd gptl-8.1.1 >/dev/null
+./configure --prefix=$INSTALL_ROOT --disable-libunwind CC=cc CXX=CC FC=ftn
+make install
+popd >/dev/null
+
+git clone git@github.com:jychoi-hpc/gptl4py.git || true
+pushd gptl4py >/dev/null
+GPTL_DIR=$INSTALL_ROOT CC=cc CXX=CC pip_retry . --no-build-isolation --verbose
+popd >/dev/null
+
+
+# ============================================================
+# hydragnn install
+# ============================================================
+HYDRAGNN_FRONTIER="${INSTALL_ROOT}/HydraGNN"
+export HYDRAGNN_FRONTIER
+mkdir -p "$HYDRAGNN_FRONTIER"
+cd "$HYDRAGNN_FRONTIER"
+
+git clone https://github.com/ORNL/HydraGNN.git || true
+cd HydraGNN
+
+"$ENV_PATH/bin/python" -m pip uninstall -y hydragnn || true
+"$ENV_PATH/bin/python" -m pip install -e . --verbose
+
+assert_numpy_1264
+
+cd "$REPO_ROOT"
+
 # ----------------------------------------------------------------------------
 banner "Post-install verification"
 # ----------------------------------------------------------------------------
