@@ -1,0 +1,30 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "mattergen/scripts/run.py",
+            "console": "integratedTerminal",
+            "cwd": "lustre/orion/lrn070/proj-shared/patxi/adiosdataset/mattergen",
+            "env": {"PYTHONPATH": "${workspaceFolder}"}
+        },
+
+        {
+            "name": "Python Debugger: Current File - generation ",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "mattergen/scripts/generate.py",
+            "console": "integratedTerminal",
+            "cwd": "lustre/orion/lrn070/proj-shared/patxi/adiosdataset/mattergen",
+            "env": {"PYTHONPATH": "${workspaceFolder}"},
+            "args": ["model_path=checkpoints/mp_20_base"]
+        }
+        
+    ]
+}

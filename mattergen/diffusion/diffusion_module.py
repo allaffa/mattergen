@@ -20,7 +20,6 @@ BatchTransform = Callable[[T], T]
 def identity(x: T) -> T:
     return x
 
-
 class DiffusionModule(torch.nn.Module, Generic[T]):
     """Denoising diffusion model for a multi-part state"""
 
@@ -44,7 +43,6 @@ class DiffusionModule(torch.nn.Module, Generic[T]):
             max_t=corruption.T,
         )
 
-        # Check corruption for nn.Modules and register them here.
         self._register_corruption_modules()
 
     def _register_corruption_modules(self):
@@ -57,7 +55,7 @@ class DiffusionModule(torch.nn.Module, Generic[T]):
             if isinstance(_corruption, torch.nn.Module):
                 self.register_module(f"MultiCorruption:{idx}:{key}", _corruption)
 
-    def calc_loss(
+    def forward(
         self, batch: T, node_is_unmasked: torch.LongTensor | None = None
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
@@ -65,14 +63,8 @@ class DiffusionModule(torch.nn.Module, Generic[T]):
         context/conditioning fields. Add noise, predict score using score model, then calculate
         loss.
 
-        Args:
-            batch: batch of training data
-            node_is_unmasked: mask that has a value 1 for nodes that are included in the loss, and
-                a value of 0 for nodes that should be ignored. If None, all nodes are included.
-
-        Returns:
-            loss: the loss for the batch
-            metrics: a dictionary of metrics for the batch
+        This is implemented in `forward()` so DistributedDataParallel can safely wrap it and
+        training can call `model(...)`.
         """
         batch = self.pre_corruption_fn(batch)
 
@@ -91,41 +83,23 @@ class DiffusionModule(torch.nn.Module, Generic[T]):
 
         return loss, metrics
 
+    def calc_loss(
+        self, batch: T, node_is_unmasked: torch.LongTensor | None = None
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """
+        Backward-compatible alias. Prefer calling `model(...)` in training, especially under DDP.
+        """
+        return self.forward(batch, node_is_unmasked=node_is_unmasked)
+
     def _corrupt_batch(
         self,
         batch: T,
     ) -> tuple[T, torch.Tensor]:
-        """
-        Corrupt a batch of data for use in a training step:
-        - sample a different timestep for each sample in the batch
-        - add noise according to the corruption process
-
-        Args:
-            batch: Batch of clean states
-
-        Returns:
-            noisy_batch: batch of noisy samples
-            t: the timestep used for each sample in the batch
-
-        """
-        # Sample timesteps
         t = self.sample_timesteps(batch)
-
-        # Add noise to data
         noisy_batch = self.corruption.sample_marginal(batch, t)
-
         return noisy_batch, t
 
     def score_fn(self, x: T, t: torch.Tensor) -> T:
-        """Calculate the score of a batch of data at a given timestep
-
-        Args:
-            x: batch of data
-            t: timestep
-
-        Returns:
-            score: score of the batch of data at the given timestep
-        """
         model_out: T = self.model(x, t)
         fns = {k: convert_model_out_to_score for k in self.corruption.sdes.keys()}
 
@@ -141,14 +115,6 @@ class DiffusionModule(torch.nn.Module, Generic[T]):
         return model_out.replace(**scores)
 
     def sample_timesteps(self, batch: T) -> torch.Tensor:
-        """Sample the timesteps, which will be used to determine how much noise
-        to add to data.
-
-        Args:
-           batch: batch of data to be corrupted
-
-        Returns: sampled timesteps
-        """
         return self.timestep_sampler(
             batch_size=batch.get_batch_size(),
             device=self._get_device(batch),

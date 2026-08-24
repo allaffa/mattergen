@@ -8,6 +8,7 @@ from functools import cached_property, lru_cache
 from typing import Any, Iterable, Protocol, Sequence, Type, TypeVar
 
 import numpy as np
+import glob
 import numpy.typing
 import pandas as pd
 import torch
@@ -16,6 +17,9 @@ from pymatgen.io.cif import CifParser
 from pymatgen.symmetry.groups import SpaceGroup
 from torch.utils.data import Dataset
 from tqdm.auto import tqdm
+
+
+from mpi4py import MPI
 
 from mattergen.common.data.backends import (
     CacheBundle,
@@ -26,10 +30,13 @@ from mattergen.common.data.backends import (
     write_cache,
 )
 from mattergen.common.data.chemgraph import ChemGraph
+from mattergen.common.data.adiosDataset import LazyAdiosCrystalDataset,HydraGNNAdiosCrystalDataset
+
 from mattergen.common.data.transform import Transform
 from mattergen.common.data.types import PropertySourceId
 from mattergen.common.globals import PROJECT_ROOT
 from mattergen.common.utils.globals import PROPERTY_SOURCE_IDS
+
 
 T = TypeVar("T", bound="BaseDataset")
 
@@ -120,6 +127,87 @@ class BaseDataset(Dataset):
             properties=properties,
             comm=comm,
         ).build(cls, dataset_transforms=dataset_transforms)
+    
+    @classmethod
+    def from_adios_file(
+        cls: Type[T],
+        split: str,
+        data_path: str,
+        transforms: list[Transform] | None = None,
+        properties: list[PropertySourceId] | None = None,
+        dataset_transforms: list[DatasetTransform] | None = None,
+        comm: Any = None,
+    ) -> T:
+        """
+        Load a dataset from an adios file
+
+        Args:
+            data_path: path to the adios data set. assuming that train/val/test splits are inside
+            transforms: List of transforms to apply to **each datapoint** when loading, e.g., to make the lattice matrices symmetric.
+            properties: List of properties to condition on.
+            dataset_transforms: List of transforms to apply to the **whole dataset**, e.g., to filter out certain entries.
+            comm: Optional MPI communicator. When supplied (and its size is
+                > 1), only rank 0 reads from disk and the resulting bundle
+                is broadcast to every rank, mirroring HydraGNN's collective
+                IO policy.
+
+        Returns:
+            The dataset.
+        """
+
+        # note that currently there is no dataset_transform
+        # the default mattergen has "filter_sparse_properties"
+        # which sounds like some pruning/screening over the entire
+        # dataset. thats a little wierd for adios file. 
+        # ignoring for now - maybe include back in later
+        return LazyAdiosCrystalDataset(
+            path=data_path,
+            split=split,
+            transforms=transforms,
+            properties=properties
+        )
+    
+    @classmethod
+    def from_adios_file_hydragnn(
+        cls: Type[T],
+        split: str,
+        data_path: str,
+        transforms: list[Transform] | None = None,
+        properties: list[PropertySourceId] | None = None,
+        keys: list[str] | None = None,
+        dataset_transforms: list[DatasetTransform] | None = None,
+        comm: Any = None,
+    ) -> T:
+        """
+        Load a dataset from an adios file
+
+        Args:
+            data_path: path to the adios data set. assuming that train/val/test splits are inside
+            transforms: List of transforms to apply to **each datapoint** when loading, e.g., to make the lattice matrices symmetric.
+            properties: List of properties to condition on.
+            dataset_transforms: List of transforms to apply to the **whole dataset**, e.g., to filter out certain entries.
+            comm: Optional MPI communicator. When supplied (and its size is
+                > 1), only rank 0 reads from disk and the resulting bundle
+                is broadcast to every rank, mirroring HydraGNN's collective
+                IO policy.
+
+        Returns:
+            The dataset.
+        """
+
+        # note that currently there is no dataset_transform
+        # the default mattergen has "filter_sparse_properties"
+        # which sounds like some pruning/screening over the entire
+        # dataset. thats a little wierd for adios file. 
+        # ignoring for now - maybe include back in later
+        return HydraGNNAdiosCrystalDataset(
+            filename=data_path,
+            keys=keys,
+            label=split,
+            comm=MPI.COMM_WORLD,
+            transforms=transforms,
+            properties=properties # this does nothing currently
+        )
 
     def subset(self, indices: Sequence[int]) -> "BaseDataset":
         """

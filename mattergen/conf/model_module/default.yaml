@@ -4,10 +4,20 @@ optimizer_partial:
   _target_: torch.optim.Adam
   _partial_: true
 scheduler_partials:
+  # Warmup (linear) for the first N steps
+  # - scheduler:
+  #     _target_: torch.optim.lr_scheduler.LinearLR
+  #     start_factor: 0.01     # lr starts at 0.1 * base_lr
+  #     end_factor: 1.0       # linearly warm up to base_lr
+  #     total_iters: 10     # warmup steps (batches)
+  #     _partial_: true
+  #   interval: epoch
+  #   frequency: 1
+  # Then switch to ReduceLROnPlateau (same as your commented block)
   - scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-      factor: 0.6
-      patience: 100
+      factor: 0.75
+      patience: 500
       min_lr: 1e-6
       _partial_: true
     interval: epoch

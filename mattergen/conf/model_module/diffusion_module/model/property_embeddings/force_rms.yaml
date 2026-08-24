@@ -1,0 +1,16 @@
+_target_: mattergen.property_embeddings.PropertyEmbedding
+name: force_rms
+
+unconditional_embedding_module:
+  _target_: mattergen.property_embeddings.EmbeddingVector
+  hidden_dim: ${model_module.diffusion_module.model.hidden_dim}
+
+conditional_embedding_module:
+  _target_: mattergen.diffusion.model_utils.NoiseLevelEncoding
+  d_model: ${model_module.diffusion_module.model.hidden_dim}
+
+scaler:
+  _target_: mattergen.common.utils.data_utils.StandardScalerTorch
+  log10_transform: true
+  means: 0.09097193 #log10 mean computed from a sample of 8455
+  stds: 0.48697470 #log10 std computed from a sample of 8455

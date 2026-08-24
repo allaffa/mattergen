@@ -3,18 +3,17 @@
 #SBATCH -J HydraGNN
 #SBATCH -o mattergen-%j.out
 #SBATCH -e mattergen-%j.out
-#SBATCH -t 00:30:00
+#SBATCH -t 01:00:00
 #SBATCH -p batch 
-##SBATCH -q debug
-#SBATCH -N 2 # 128  
-##SBATCH -S 1
+#SBATCH -q debug
+#SBATCH -N 32 # 128  
+#SBATCH --ntasks-per-node=8
 
- 
-
-CASE_ROOT=/lustre/orion/lrn070/proj-shared/zhangp/mattergen
-source $CASE_ROOT/installation_scripts/module-to-load-frontier-rocm720.sh
+CASE_ROOT=/lustre/orion/lrn070/proj-shared/patxi/jaime/mattergen
+source $CASE_ROOT/module-to-load-frontier-rocm720.sh
 
 export PYTHONPATH=$PWD:$PYTHONPATH
+#export PYTHONPATH=/lustre/orion/lrn070/proj-shared/patxi/envs/HydraGNN-Installation-Frontier/ADIOS2-Frontier/adios2-build/lib/python3.11/site-packages/:$PYTHONPATH
 export PYTHONPATH=/lustre/orion/lrn070/world-shared/mlupopa/HydraGNN-Installation-Frontier/ADIOS2-Frontier/adios2-build/lib/python3.11/site-packages/:$PYTHONPATH
 
 which python
@@ -41,11 +40,16 @@ export HYDRAGNN_NUM_WORKERS=0
 export HYDRAGNN_USE_VARIABLE_GRAPH_SIZE=1
 export HYDRAGNN_AGGR_BACKEND=mpi
 export HYDRAGNN_VALTEST=1
+export HYDRA_FULL_ERROR=1
+
+# patxi - 07202026 - somehow empirically observed that
+#         cannot restart from a checkpoint without this nodes>64
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 ## Getting error without these after 20 nodes
-export NCCL_P2P_LEVEL=NVL
-export NCCL_P2P_DISABLE=1
-export FI_MR_CACHE_MONITOR=disabled
+# export NCCL_P2P_LEVEL=NVL
+# export NCCL_P2P_DISABLE=1
+# export FI_MR_CACHE_MONITOR=disabled
 
 ## aws-ofi-rccl plugin settings
 export TORCH_NCCL_HIGH_PRIORITY=1
@@ -59,9 +63,9 @@ export FI_CXI_DEFAULT_CQ_SIZE=131072  # Ask the network stack to allocate additi
 export FI_CXI_DEFAULT_TX_SIZE=2048    # Ask the network stack to allocate additional space to hold pending outgoing messages.
 export FI_CXI_RX_MATCH_MODE=hybrid    # Allow the network stack to transition to software mode if necessary.
  
-export NCCL_NET_GDR_LEVEL=3           # Typically improves performance, but remove this setting if you encounter a hang/crash.
-export NCCL_CROSS_NIC=1               # On large systems, this NCCL setting has been found to improve performance
-export NCCL_SOCKET_IFNAME=hsn0        # NCCL/RCCL will use the high speed network to coordinate startup.
+#export NCCL_NET_GDR_LEVEL=3           # Typically improves performance, but remove this setting if you encounter a hang/crash.
+# export NCCL_CROSS_NIC=1               # On large systems, this NCCL setting has been found to improve performance
+# export NCCL_SOCKET_IFNAME=hsn0        # NCCL/RCCL will use the high speed network to coordinate startup.
 
 
 ## Checking
@@ -79,7 +83,8 @@ env | grep ^HYDRA
 
 #srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
 
-srun --ntasks-per-node=8  mattergen-train data_module=mp_20 ~trainer.logger
+srun -N$SLURM_JOB_NUM_NODES -n$((SLURM_JOB_NUM_NODES*8)) -c 7 --gpus-per-node=8 mattergen-train ~trainer.logger
+
 
 
 

@@ -50,6 +50,7 @@ PROPERTY_SOURCE_IDS = [
     "ml_bulk_modulus",
     "chemical_system",
     "dft_band_gap",
+    "force_rms"
 ]
 
 SELECTED_ATOMIC_NUMBERS = [
@@ -129,6 +130,17 @@ SELECTED_ATOMIC_NUMBERS = [
     81,
     82,
     83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94
 ]
 MAX_ATOMIC_NUM = 100
 

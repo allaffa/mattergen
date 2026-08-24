@@ -17,25 +17,20 @@ dataset_transforms:
     _partial_: true
 
 average_density: 0.05771451654022283 # atoms/Angstrom**3 : this is used in models/scripts/run.py to set lattice_limit_density
-root_dir: ${oc.env:PROJECT_ROOT}/../../../mattergen/datasets/cache/mp_20
+root_dir: /lustre/orion/lrn070/proj-shared/patxi/adios/data/mp20
 
 train_dataset:
-  _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
-  cache_path: ${data_module.root_dir}/train
+  _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
+  split: trainset
+  data_path: ${data_module.root_dir}
   properties: ${data_module.properties}
   transforms: ${data_module.transforms}
   dataset_transforms: ${data_module.dataset_transforms}
 
 val_dataset:
-  _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
-  cache_path: ${data_module.root_dir}/val
-  properties: ${data_module.properties}
-  transforms: ${data_module.transforms}
-  dataset_transforms: ${data_module.dataset_transforms}
-
-test_dataset:
-  _target_: mattergen.common.data.dataset.CrystalDataset.from_cache_path
-  cache_path: ${data_module.root_dir}/test
+  _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
+  split: valset
+  data_path: ${data_module.root_dir}
   properties: ${data_module.properties}
   transforms: ${data_module.transforms}
   dataset_transforms: ${data_module.dataset_transforms}
@@ -43,7 +38,6 @@ test_dataset:
 num_workers:
   train: 8
   val: 8
-  test: 8
 
 batch_size:
   # total batch size of 512, adjust for number of devices, nodes, and gradient accumulation

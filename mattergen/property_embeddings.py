@@ -509,7 +509,9 @@ class PropertyEmbedding(torch.nn.Module):
 
             # optionally apply normalization, eg unit standard deviation and zero mean
             data = self.scaler(data)
-            conditional_embedding: torch.Tensor = self.conditional_embedding_module(data)
+            conditional_embedding: torch.Tensor = self.conditional_embedding_module(data).to(
+                batch.pos.device
+            )
             unconditional_embedding: torch.Tensor = self.unconditional_embedding_module(x=data).to(
                 batch.pos.device
             )
