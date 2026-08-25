@@ -3,10 +3,10 @@
 #SBATCH -J mattergen-train
 #SBATCH -o jobOutputs/mattergen-train-%j.out
 #SBATCH -e jobOutputs/mattergen-train-%j.out
-#SBATCH -t 00:15:00
+#SBATCH -t 12:00:00
 #SBATCH -p batch
-#SBATCH -q debug
-#SBATCH -N 512
+##SBATCH -q debug
+#SBATCH -N 256
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-task=1
 #SBATCH --gpu-bind=none
@@ -20,9 +20,9 @@ set -euo pipefail
 # package. We prepend it to PYTHONPATH so Python imports the local MatterGen
 # checkout first. This is useful for debugging local code instead of picking up
 # another installed/editable MatterGen from elsewhere.
-REPO_ROOT=/lustre/orion/lrn070/proj-shared/patxi/BatchMeanPatxi_Max
+REPO_ROOT=/lustre/orion/lrn070/proj-shared/patxi/main # change this
+SCRIPT_DIR=/lustre/orion/lrn070/proj-shared/patxi/main/installation_scripts # change this
 ENV_PATH=/lustre/orion/lrn070/proj-shared/patxi/envs/HydraGNN-Installation-Frontier/hydragnn_venv
-SCRIPT_DIR=/lustre/orion/lrn070/proj-shared/patxi/BatchMeanPatxi_Max/installation_scripts
 
 # Options (override on submission if desired)
 DATA_MODULE="${DATA_MODULE:-OMat24-v2}"
