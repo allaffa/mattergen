@@ -1,9 +1,11 @@
 import torch
 from torch.utils.data import Dataset
 from mattergen.common.data.chemgraph import ChemGraph
+from mattergen.common.utils.rank_debug import trace_rank
 import adios2
 import numpy as np
 import re
+from threading import Lock
 
 
 def _parse_adios_shape(value, variable):
@@ -13,26 +15,57 @@ def _parse_adios_shape(value, variable):
         raise ValueError(f"ADIOS variable {variable!r} has no global shape")
     return shape
 
-# this is terrible but trying to load twice will make it work...
-try:    
-    from hydragnn.utils.datasets.adiosdataset import AdiosDataset
-except:
-    from hydragnn.utils.datasets.adiosdataset import AdiosDataset
+class HydraGNNAdiosCrystalDataset(Dataset):
+    """Read HydraGNN-format ADIOS data without importing all of HydraGNN.
 
+    HydraGNN's top-level package eagerly imports its training, plotting, and
+    TensorFlow-related dependencies.  Importing that package concurrently on
+    hundreds of Frontier ranks creates a severe shared-filesystem startup
+    storm before the ADIOS reader is even constructed.  This class preserves
+    the on-disk format and the existing MatterGen-facing API while using an
+    independent persistent ADIOS reader on each rank.
+    """
 
-class HydraGNNAdiosCrystalDataset(AdiosDataset):
-    """Adapt HydraGNN's persistent ADIOS reader to MatterGen ChemGraphs."""
-
-    def __init__(self, *args, transforms=None,properties=None, **kwargs):
+    def __init__(
+        self,
+        filename,
+        label,
+        comm=None,
+        transforms=None,
+        properties=None,
+        keys=None,
+        **_,
+    ):
+        # ``comm`` remains accepted for configuration compatibility.  Reads
+        # are deliberately independent, so dataset construction has no MPI
+        # collective that can wait on a rank still importing Python modules.
+        del comm
+        self.filename = str(filename)
+        self.label = str(label)
         self.transforms = transforms
         self.property_names = set(properties or [])
+        self.keys = tuple(keys or ("pos", "cell", "atomic_numbers", "forces"))
+        self._reader_lock = Lock()
+        trace_rank("adios_dataset_init_entered", label=self.label)
+        trace_rank("before_adios_file_open", label=self.label)
+        self.f = adios2.FileReader(self.filename)
+        trace_rank("after_adios_file_open", label=self.label)
+        self.variables = self.f.available_variables()
 
-        super().__init__(*args, **kwargs)
         self.node_count_variable = f"{self.label}/natoms"
+        if self.node_count_variable not in self.variables:
+            raise KeyError(f"ADIOS variable not found: {self.node_count_variable}")
+        self.n_samples = _parse_adios_shape(
+            self.variables[self.node_count_variable]["Shape"],
+            self.node_count_variable,
+        )[0]
+
         atomic_numbers_variable = f"{self.label}/atomic_numbers"
-        variables = self.f.available_variables()
+        if atomic_numbers_variable not in self.variables:
+            raise KeyError(f"ADIOS variable not found: {atomic_numbers_variable}")
         atomic_shape = _parse_adios_shape(
-            variables[atomic_numbers_variable]["Shape"], atomic_numbers_variable
+            self.variables[atomic_numbers_variable]["Shape"],
+            atomic_numbers_variable,
         )
         non_unit_extents = [extent for extent in atomic_shape if extent != 1]
         if len(non_unit_extents) != 1:
@@ -40,69 +73,129 @@ class HydraGNNAdiosCrystalDataset(AdiosDataset):
                 f"Cannot infer total atoms from {atomic_numbers_variable!r} "
                 f"with shape {atomic_shape}"
             )
-        # Lets the streaming sampler derive average atoms/sample from ADIOS
-        # global metadata without reading a billion-entry natoms array.
         self.total_node_count = int(non_unit_extents[0])
 
-    def read_node_counts_range(self, start, count):
-        """Read one contiguous natoms range through the persistent reader."""
+        required_keys = {"pos", "cell", "atomic_numbers"}
+        if "force_rms" in self.property_names:
+            required_keys.add("forces")
+        missing = [
+            key
+            for key in sorted(required_keys)
+            if f"{self.label}/{key}" not in self.variables
+        ]
+        if missing:
+            raise KeyError(
+                f"ADIOS split {self.label!r} is missing required variables: {missing}"
+            )
+        trace_rank(
+            "adios_dataset_init_completed",
+            label=self.label,
+            samples=self.n_samples,
+            total_nodes=self.total_node_count,
+        )
 
-        return np.asarray(
-            self.f.read(
-                self.node_count_variable,
-                [int(start)],
-                [int(count)],
-            ),
-            dtype=np.int64,
-        ).reshape(-1)
+    def __len__(self):
+        return self.n_samples
+
+    def len(self):
+        """Compatibility with HydraGNN's historical dataset interface."""
+
+        return len(self)
+
+    def _read_ragged_sample(self, name, idx):
+        variable = f"{self.label}/{name}"
+        count_variable = f"{variable}/variable_count"
+        offset_variable = f"{variable}/variable_offset"
+        count = int(
+            np.asarray(self.f.read(count_variable, [idx], [1])).reshape(-1)[0]
+        )
+        offset = int(
+            np.asarray(self.f.read(offset_variable, [idx], [1])).reshape(-1)[0]
+        )
+        shape = _parse_adios_shape(self.variables[variable]["Shape"], variable)
+        start = [0] * len(shape)
+        selection = list(shape)
+        start[0] = offset
+        selection[0] = count
+        return np.asarray(self.f.read(variable, start, selection))
+
+    def read_node_counts_range(self, start, count):
+        """Read contiguous ``natoms`` metadata without materializing samples."""
+
+        start = int(start)
+        count = int(count)
+        if start < 0 or count < 0 or start + count > len(self):
+            raise IndexError("node-count range is outside the dataset")
+        if count == 0:
+            return np.empty(0, dtype=np.int64)
+        with self._reader_lock:
+            return np.asarray(
+                self.f.read(self.node_count_variable, [start], [count]),
+                dtype=np.int64,
+            ).reshape(-1)
 
     def __getitem__(self, idx) -> ChemGraph:
+        idx = int(idx)
+        if idx < 0:
+            idx += len(self)
+        if not 0 <= idx < len(self):
+            raise IndexError(idx)
 
-        # just use the parent class get method
-        object = super().get(idx)
+        with self._reader_lock:
+            atomic_numbers = torch.as_tensor(
+                self._read_ragged_sample("atomic_numbers", idx)
+            ).reshape(-1).long()
+            pos = torch.as_tensor(
+                self._read_ragged_sample("pos", idx), dtype=torch.float32
+            )
+            cell = torch.as_tensor(
+                self._read_ragged_sample("cell", idx), dtype=torch.float32
+            ).reshape(3, 3)
+            forces = None
+            if "force_rms" in self.property_names:
+                forces = torch.as_tensor(
+                    self._read_ragged_sample("forces", idx), dtype=torch.float32
+                ).reshape(-1, 3)
 
-        # Get number of atoms in the structure
-        natoms = object.atomic_numbers.shape[0]
-
-        # Get the atomic numbers of the atoms in the structure 
-        atomic_numbers = object.atomic_numbers.reshape(-1)
-
-        # Get the positions of the atoms in the structure
-        pos = object.pos
-
-        # Cell is stored as 3 rows of width 3 per structure.
-        cell = object.cell.reshape(3,3)
-
-        # Get all the requested properties - leave for later
+        natoms = int(atomic_numbers.numel())
         props = {}
-
-        # Read in forces and compute force_rms if requested
-        if "force_rms" in self.property_names:
-            forces = torch.as_tensor(object.forces, dtype=torch.float32).reshape(natoms, 3)
+        if forces is not None:
+            if forces.shape[0] != natoms:
+                raise ValueError(
+                    f"Sample {idx} has {natoms} atoms but {forces.shape[0]} force rows"
+                )
             force_rms = torch.sqrt(torch.sum(forces.square(), dim=-1).mean())
             props["force_rms"] = force_rms.clamp_min(1e-8).reshape(1)
 
-        # Make the chemgraph
         data = ChemGraph(
-                pos = pos % 1.0,
-                cell = cell.unsqueeze(0),
-                atomic_numbers = atomic_numbers,
-                num_atoms = natoms,
-                num_nodes = natoms,
-                **props
-            )
-
-        # Apply transforms
+            pos=pos % 1.0,
+            cell=cell.unsqueeze(0),
+            atomic_numbers=atomic_numbers,
+            num_atoms=natoms,
+            num_nodes=natoms,
+            **props,
+        )
         if self.transforms is not None:
-            for t in self.transforms:
-                data = t(data)
+            for transform in self.transforms:
+                data = transform(data)
+        return data
 
-        # spit it back
-        return(data)
-    
+    def get(self, idx):
+        """Compatibility with HydraGNN's historical dataset interface."""
 
-    
+        return self[idx]
 
+    def close(self):
+        reader = getattr(self, "f", None)
+        if reader is not None:
+            reader.close()
+            self.f = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 class LazyAdiosCrystalDataset(Dataset):
     """

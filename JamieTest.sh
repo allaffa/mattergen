@@ -124,6 +124,10 @@ run_mattergen_rank() {
     host="$(hostname)"
 
     export ROCR_VISIBLE_DEVICES="${SLURM_LOCALID}"
+    # One node-local Matplotlib cache per node prevents hundreds of ranks from
+    # contending on the shared home-directory font cache during imports.
+    export MPLCONFIGDIR="/tmp/matplotlib-${SLURM_JOB_ID}"
+    mkdir -p "${MPLCONFIGDIR}"
     export MATTERGEN_RANK_TRACE_FILE="${RANK_LOG_DIR}/trace-rank-${rank}-${host}.log"
     local status_file="${RANK_LOG_DIR}/status-rank-${rank}-${host}.txt"
 

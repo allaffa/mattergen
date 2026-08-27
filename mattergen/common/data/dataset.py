@@ -19,8 +19,6 @@ from torch.utils.data import Dataset
 from tqdm.auto import tqdm
 
 
-from mpi4py import MPI
-
 from mattergen.common.data.backends import (
     CacheBundle,
     PickleFormat,
@@ -113,10 +111,8 @@ class BaseDataset(Dataset):
             transforms: List of transforms to apply to **each datapoint** when loading, e.g., to make the lattice matrices symmetric.
             properties: List of properties to condition on.
             dataset_transforms: List of transforms to apply to the **whole dataset**, e.g., to filter out certain entries.
-            comm: Optional MPI communicator. When supplied (and its size is
-                > 1), only rank 0 reads from disk and the resulting bundle
-                is broadcast to every rank, mirroring HydraGNN's collective
-                IO policy.
+            comm: Retained for compatibility with older callers. The reader
+                performs independent persistent ADIOS reads on every rank.
 
         Returns:
             The dataset.
@@ -204,9 +200,8 @@ class BaseDataset(Dataset):
             filename=data_path,
             keys=keys,
             label=split,
-            comm=MPI.COMM_WORLD,
             transforms=transforms,
-            properties=properties # this does nothing currently
+            properties=properties,
         )
 
     def subset(self, indices: Sequence[int]) -> "BaseDataset":
