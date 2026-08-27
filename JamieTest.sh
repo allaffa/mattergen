@@ -16,20 +16,33 @@ set -euo pipefail
 # A 64-node submission launches 512 ranks. Override -N with sbatch when doing
 # the matched 256-rank test; task counts are always derived from the allocation.
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
-ENV_PATH=/lustre/orion/lrn070/proj-shared/patxi/envs/hydragenn_mattergen720
+SCRIPT_DIR="${REPO_ROOT}/installation_scripts"
+# This is the ROCm 7.2 environment used by the known-working Frontier job.
+# MATTERGEN_ENV_PATH can override it without editing this script.
+ENV_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn070/proj-shared/patxi/envs/HydraGNN-Installation-Frontier/hydragnn_venv}"
 DATA_MODULE="${DATA_MODULE:-OMat24-v2}"
 RANK_LOG_DIR="${REPO_ROOT}/jobOutputs/JamieTest-${SLURM_JOB_ID}"
 
 cd "${REPO_ROOT}"
+[[ -f pyproject.toml && -d mattergen ]] || {
+    echo "ERROR: submit JamieTest.sh from the top level of your MatterGen checkout." >&2
+    exit 1
+}
 mkdir -p "${RANK_LOG_DIR}"
 
-# Load the ROCm 7.2 stack, then explicitly activate the shared environment.
+# Do not let a Conda environment inherited from the submission shell affect
+# module loading or activation of the known-working shared environment.
+unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE \
+    CONDA_PROMPT_MODIFIER 2>/dev/null || true
+
+# Load the same ROCm 7.2 stack and environment as the working reference job.
 # shellcheck disable=SC1091
-source "${REPO_ROOT}/installation_scripts/module-to-load-frontier-rocm720.sh"
+source "${SCRIPT_DIR}/module-to-load-frontier-rocm720.sh"
 eval "$(conda shell.bash hook)"
 conda activate "${ENV_PATH}"
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+export REPO_ROOT
 export PROJECT_ROOT="${REPO_ROOT}"
 export OUTPUT_DIR="${REPO_ROOT}/outputs/JamieTest-${SLURM_JOB_ID}"
 
@@ -41,10 +54,12 @@ export OMP_NUM_THREADS=7
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export HYDRA_FULL_ERROR=1
+export TMPDIR=/tmp
 export MIOPEN_DISABLE_CACHE=1
 export GPU_MAX_HW_QUEUES=2
 export MIOPEN_USER_DB_PATH="/tmp/miopen-${SLURM_JOB_ID}"
 export MIOPEN_CUSTOM_CACHE_DIR="${MIOPEN_USER_DB_PATH}"
+mkdir -p "${MIOPEN_USER_DB_PATH}"
 
 # Use Frontier's module-provided RCCL network plugin. In particular, do not
 # prepend the legacy ROCm 6.3.1 aws-ofi-rccl build used by submit.sh.
@@ -79,7 +94,28 @@ echo "master=${MASTER_ADDR}:${MASTER_PORT} data_module=${DATA_MODULE}"
 echo "rank_logs=${RANK_LOG_DIR}"
 module list
 
-python -c 'import adios2, mattergen, torch; print("mattergen", mattergen.__file__); print("torch", torch.__version__, "HIP", torch.version.hip); print("adios2", adios2.__version__, adios2.__file__)'
+python - <<'PY'
+import os
+from pathlib import Path
+
+import adios2
+import mattergen
+import torch
+
+repo_root = Path(os.environ["REPO_ROOT"]).resolve()
+mattergen_file = Path(mattergen.__file__).resolve()
+try:
+    mattergen_file.relative_to(repo_root)
+except ValueError:
+    raise SystemExit(
+        f"ERROR: mattergen resolved outside this checkout: {mattergen_file} "
+        f"(expected a path under {repo_root})"
+    )
+
+print("mattergen", mattergen_file)
+print("torch", torch.__version__, "HIP", torch.version.hip)
+print("adios2", adios2.__version__, adios2.__file__)
+PY
 
 run_mattergen_rank() {
     local rank="${SLURM_PROCID:-unknown}"
