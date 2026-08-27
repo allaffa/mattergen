@@ -3,6 +3,15 @@ from torch.utils.data import Dataset
 from mattergen.common.data.chemgraph import ChemGraph
 import adios2
 import numpy as np
+import re
+
+
+def _parse_adios_shape(value, variable):
+    values = re.findall(r"\d+", value) if isinstance(value, str) else value
+    shape = tuple(int(item) for item in values)
+    if not shape:
+        raise ValueError(f"ADIOS variable {variable!r} has no global shape")
+    return shape
 
 # this is terrible but trying to load twice will make it work...
 try:    
@@ -12,32 +21,41 @@ except:
 
 
 class HydraGNNAdiosCrystalDataset(AdiosDataset):
+    """Adapt HydraGNN's persistent ADIOS reader to MatterGen ChemGraphs."""
 
     def __init__(self, *args, transforms=None,properties=None, **kwargs):
         self.transforms = transforms
         self.property_names = set(properties or [])
 
         super().__init__(*args, **kwargs)
-        """
-        Parameters for AdiosDataset
-        ----------
-        filename: str
-            adios filename
-        label: str
-            data label to load, such as trainset, testing, and valset
-        comm: MPI_comm
-            MPI communicator
-        keys: list of str
-            what keys in the adios file to consider
-        preload: bool, optional
-            Option to preload all the datasets into a memory
-        shmem: bool, optional
-            Option to use shmem to share data between processes in the same node
-        enable_cache: bool, optional
-            Option to cache data object which was already read
-        ddstore: bool, optional
-            Option to use Distributed Data Store
-        """
+        self.node_count_variable = f"{self.label}/natoms"
+        atomic_numbers_variable = f"{self.label}/atomic_numbers"
+        variables = self.f.available_variables()
+        atomic_shape = _parse_adios_shape(
+            variables[atomic_numbers_variable]["Shape"], atomic_numbers_variable
+        )
+        non_unit_extents = [extent for extent in atomic_shape if extent != 1]
+        if len(non_unit_extents) != 1:
+            raise ValueError(
+                f"Cannot infer total atoms from {atomic_numbers_variable!r} "
+                f"with shape {atomic_shape}"
+            )
+        # Lets the streaming sampler derive average atoms/sample from ADIOS
+        # global metadata without reading a billion-entry natoms array.
+        self.total_node_count = int(non_unit_extents[0])
+
+    def read_node_counts_range(self, start, count):
+        """Read one contiguous natoms range through the persistent reader."""
+
+        return np.asarray(
+            self.f.read(
+                self.node_count_variable,
+                [int(start)],
+                [int(count)],
+            ),
+            dtype=np.int64,
+        ).reshape(-1)
+
     def __getitem__(self, idx) -> ChemGraph:
 
         # just use the parent class get method

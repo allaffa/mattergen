@@ -14,6 +14,7 @@ import yaml
 from mattergen.common.data.dataloader import build_split_dataloader
 from mattergen.common.data.property_scalers import compute_property_scalers
 from mattergen.common.utils import distributed as ddp_utils
+from mattergen.common.utils.rank_debug import trace_rank
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
 from mattergen.diffusion.model_module import DiffusionModelModule
@@ -406,7 +407,10 @@ def fit(
     # the legacy `native_trainer.distributed_backend` setting (use "auto" or
     # leave unset to let the helper pick the best backend for this host).
     backend_pref = native_cfg.get("distributed_backend", "auto") if native_cfg is not None else "auto"
+    trace_rank("native_fit_entered", backend_preference=backend_pref)
+    trace_rank("before_ddp_setup")
     world_size, rank = ddp_utils.setup_ddp(backend=backend_pref)
+    trace_rank("after_ddp_setup", rank=rank, world_size=world_size)
     distributed = world_size > 1
     local_rank = ddp_utils.get_local_rank() if distributed else None
 
@@ -416,8 +420,12 @@ def fit(
     if rank == 0:
         logger.info("DDP setup: %s", ddp_utils.hostname_port_summary())
 
+    trace_rank("before_device_binding", local_rank=local_rank)
     device = ddp_utils.resolve_device(local_rank)
+    trace_rank("after_device_binding", device=str(device))
+    trace_rank("before_model_to_device")
     model_module = model_module.to(device)
+    trace_rank("after_model_to_device")
     diffusion_module = model_module.diffusion_module
     model = diffusion_module
 
@@ -433,13 +441,16 @@ def fit(
 
 
     if native_cfg.get("set_property_scalers", True):
+        trace_rank("before_property_scalers")
         compute_property_scalers(datamodule=datamodule, property_embeddings=model.model.property_embeddings)
         if hasattr(model.model, "property_embeddings_adapt"):
             compute_property_scalers(
                 datamodule=datamodule,
                 property_embeddings=model.model.property_embeddings_adapt,
             )
+        trace_rank("after_property_scalers")
 
+    trace_rank("before_ddp_wrap")
     model = ddp_utils.wrap_ddp(
         model,
         device,
@@ -448,6 +459,7 @@ def fit(
         static_graph=bool(native_cfg.get("static_graph", False)),
         gradient_as_bucket_view=bool(native_cfg.get("gradient_as_bucket_view", True)),
     )
+    trace_rank("after_ddp_wrap")
 
     if distributed:
         dist.barrier()
@@ -455,8 +467,11 @@ def fit(
         _log_model_sync(model.module, rank, world_size, tag="after_ddp_wrap")
 
 
+    trace_rank("before_optimizer_creation")
     optimizer, scheduler_cfgs = _parse_optimizers(model_module.configure_optimizers())
+    trace_rank("after_optimizer_creation")
 
+    trace_rank("before_train_dataloader")
     train_loader, train_sampler = build_split_dataloader(
         datamodule,
         "train",
@@ -465,7 +480,10 @@ def fit(
     )
     if train_loader is None:
         raise ValueError("Native DDP requires a train dataloader.")
+    trace_rank("after_train_dataloader", steps=len(train_loader))
+    trace_rank("before_loader_length_collective")
     _assert_equal_loader_lengths(train_loader, device, distributed)
+    trace_rank("after_loader_length_collective")
     if (
         ckpt_path is not None
         and getattr(train_sampler, "is_streaming_node_budget", False)
@@ -476,12 +494,14 @@ def fit(
             "training starts a fresh deterministic stream at the resumed epoch."
         )
 
+    trace_rank("before_val_dataloader")
     val_loader, _ = build_split_dataloader(
         datamodule,
         "val",
         distributed=distributed,
         shuffle=False,
     )
+    trace_rank("after_val_dataloader", steps=(len(val_loader) if val_loader is not None else 0))
 
     max_epochs = int(trainer_cfg.max_epochs)
     grad_clip = float(trainer_cfg.get("gradient_clip_val", 0.0))
@@ -530,6 +550,8 @@ def fit(
     best_k: list[tuple[float, Path]] = []
 
     for epoch in range(start_epoch, max_epochs):
+        if epoch == start_epoch:
+            trace_rank("first_epoch_entered", epoch=epoch)
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -540,12 +562,20 @@ def fit(
             # Makes sure we skip to right batch when starting from checkpoint
             if epoch == start_epoch and step_idx < resume_batch_idx:
                 continue
-            
+
+            if step_idx == 0:
+                trace_rank("first_train_batch_loaded")
             batch = _to_device(batch, device)
+            if step_idx == 0:
+                trace_rank("first_train_batch_on_device")
             optimizer.zero_grad(set_to_none=True)
 
+            if step_idx == 0:
+                trace_rank("before_first_forward")
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 loss, _metrics = model(batch)
+            if step_idx == 0:
+                trace_rank("after_first_forward")
 
             debug_ddp = bool(native_cfg.get("debug_ddp", False))
             debug_steps = int(native_cfg.get("debug_ddp_steps", 2))
@@ -563,7 +593,6 @@ def fit(
                     step_idx,
                     float(loss.detach().item()),
                 )
-
 
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
@@ -587,7 +616,11 @@ def fit(
                 scaler.step(optimizer)
                 scaler.update()
             else:
+                if step_idx == 0:
+                    trace_rank("before_first_backward")
                 loss.backward()
+                if step_idx == 0:
+                    trace_rank("after_first_backward")
 
                 if debug_ddp and step_idx < debug_steps:
                     grad_norm = _grad_l2_norm(model.module if distributed else model)
@@ -605,9 +638,11 @@ def fit(
                     torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
 
                 optimizer.step()
+            if step_idx == 0:
+                trace_rank("after_first_optimizer_step")
 
-                if debug_ddp and distributed and step_idx < debug_steps:
-                    _log_model_sync(model.module, rank, world_size, tag=f"post_step_epoch={epoch}_step={step_idx}")
+            if debug_ddp and distributed and step_idx < debug_steps:
+                _log_model_sync(model.module, rank, world_size, tag=f"post_step_epoch={epoch}_step={step_idx}")
 
 
             for name, p in (model.module if distributed else model).named_parameters():

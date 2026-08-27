@@ -50,6 +50,8 @@ batching:
   mode: fixed
   max_nodes: null
   target_nodes: null
+  max_average_samples: null
+  target_average_samples: null
   steps_per_epoch: null
   max_graphs: null
   metadata_chunk_size: 32

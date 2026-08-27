@@ -235,3 +235,32 @@ def test_build_split_dataloader_uses_streaming_batch_sampler():
     )
     assert fixed_sampler is None
     assert len(fixed_loader) == 2
+
+
+def test_average_sample_multipliers_derive_soft_and_hard_node_limits():
+    dataset = _ChemGraphDataset([2, 4, 3, 3])
+    dataset.total_node_count = 12
+    datamodule = SimpleNamespace(
+        train_dataset=dataset,
+        batch_size=OmegaConf.create({"train": 4}),
+        num_workers=OmegaConf.create({"train": 0}),
+        batching=OmegaConf.create(
+            {
+                "mode": "streaming_node_budget",
+                "target_nodes": None,
+                "max_nodes": None,
+                "target_average_samples": 3,
+                "max_average_samples": 4,
+                "steps_per_epoch": 1,
+                "shuffle": False,
+            }
+        ),
+    )
+
+    _, sampler = build_split_dataloader(
+        datamodule, "train", distributed=False, shuffle=False
+    )
+
+    assert isinstance(sampler, StreamingNodeBudgetBatchSampler)
+    assert sampler.target_nodes == 9
+    assert sampler.max_nodes == 12

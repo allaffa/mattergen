@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from typing import Any
 
@@ -11,6 +12,9 @@ from torch.utils.data.distributed import DistributedSampler
 
 from mattergen.common.data.collate import collate
 from mattergen.common.data.node_budget_sampler import StreamingNodeBudgetBatchSampler
+
+
+logger = logging.getLogger(__name__)
 
 
 def worker_init_fn(id: int):
@@ -33,6 +37,57 @@ def worker_init_fn(id: int):
 
 def _split_attr(name: str) -> str:
     return f"{name}_dataset"
+
+
+def _node_limits(dataset: Any, batching: Any) -> tuple[int, int]:
+    """Resolve explicit limits or average-sample multipliers to node counts."""
+
+    configured_max = batching.get("max_nodes")
+    configured_target = batching.get("target_nodes")
+    average_max = batching.get("max_average_samples")
+    average_target = batching.get("target_average_samples")
+
+    if configured_max is not None:
+        if average_max is not None or average_target is not None:
+            raise ValueError(
+                "Configure either max_nodes/target_nodes or average-sample limits, not both"
+            )
+        maximum = int(configured_max)
+        target = maximum if configured_target is None else int(configured_target)
+        return target, maximum
+
+    if average_max is None:
+        raise ValueError(
+            "streaming_node_budget batching requires max_nodes or max_average_samples"
+        )
+
+    total_nodes = getattr(dataset, "total_node_count", None)
+    if total_nodes is None:
+        getter = getattr(dataset, "get_total_node_count", None)
+        if callable(getter):
+            total_nodes = getter()
+    if total_nodes is None:
+        raise ValueError(
+            "average-sample node limits require exact dataset total_node_count metadata"
+        )
+
+    average_atoms = float(total_nodes) / len(dataset)
+    max_multiplier = float(average_max)
+    target_multiplier = (
+        max_multiplier if average_target is None else float(average_target)
+    )
+    target = int(round(target_multiplier * average_atoms))
+    maximum = int(round(max_multiplier * average_atoms))
+    logger.info(
+        "streaming sampler limits: average_atoms_per_sample=%.8f "
+        "target=%s*average=%s max=%s*average=%s",
+        average_atoms,
+        target_multiplier,
+        target,
+        max_multiplier,
+        maximum,
+    )
+    return target, maximum
 
 
 def build_split_dataloader(
@@ -65,8 +120,7 @@ def build_split_dataloader(
         raise ValueError(f"Unknown batching mode {batching_mode!r}.")
 
     if use_streaming_batching and split == "train" and batching_mode == "streaming_node_budget":
-        if batching.get("max_nodes") is None:
-            raise ValueError("streaming_node_budget batching requires max_nodes")
+        target_nodes, max_nodes = _node_limits(dataset, batching)
 
         num_replicas = 1
         rank = 0
@@ -78,8 +132,8 @@ def build_split_dataloader(
 
         batch_sampler = StreamingNodeBudgetBatchSampler(
             dataset,
-            max_nodes=int(batching.get("max_nodes")),
-            target_nodes=batching.get("target_nodes"),
+            max_nodes=max_nodes,
+            target_nodes=target_nodes,
             steps_per_epoch=batching.get("steps_per_epoch"),
             num_replicas=num_replicas,
             rank=rank,

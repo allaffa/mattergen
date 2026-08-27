@@ -55,4 +55,22 @@ batch_size:
   train:  ${eval:'(512//8)'}
   val: ${eval:'(512//8)'}
 
+batching:
+  mode: streaming_node_budget
+  # Soft target = 64 * average atoms/sample (derived from ADIOS metadata).
+  target_nodes: null
+  target_average_samples: 64
+  # Hard limit = 70 * average atoms/sample.
+  max_nodes: null
+  max_average_samples: 70
+  steps_per_epoch: null
+  max_graphs: null
+  metadata_chunk_size: 32
+  metadata_cache_size: null
+  metadata_source: auto
+  forward_window: 1
+  shuffle: true
+  seed: 0
+  oversized_sample: error
+
 max_epochs: 10000

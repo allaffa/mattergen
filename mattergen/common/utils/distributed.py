@@ -42,6 +42,8 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
+from mattergen.common.utils.rank_debug import trace_rank
+
 logger = logging.getLogger(__name__)
 
 
@@ -300,6 +302,7 @@ def setup_ddp(
         return get_world_size(), get_rank()
 
     world_size, world_rank = init_comm_size_and_rank()
+    trace_rank("ddp_rank_discovered", rank=world_rank, world_size=world_size)
 
     if world_size <= 1:
         if is_master():
@@ -331,11 +334,19 @@ def setup_ddp(
             )
 
         try:
+            trace_rank(
+                "before_init_process_group",
+                attempt=attempt,
+                backend=chosen_backend,
+                master_addr=master_addr,
+                master_port=port,
+            )
             dist.init_process_group(
                 backend=chosen_backend,
                 init_method="env://",
                 timeout=timedelta(seconds=timeout_seconds),
             )
+            trace_rank("after_init_process_group", backend=chosen_backend)
             return world_size, world_rank
         except Exception as exc:  # noqa: BLE001 - retry on port collisions only
             err = str(exc).lower()
