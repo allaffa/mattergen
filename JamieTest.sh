@@ -3,9 +3,8 @@
 #SBATCH -J JamieTest
 #SBATCH -o JamieTest-%j.out
 #SBATCH -e JamieTest-%j.out
-#SBATCH -t 00:30:00
-#SBATCH -p batch
-#SBATCH -q normal
+#SBATCH -t 00:10:00
+#SBATCH -q debug
 #SBATCH -N 64
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-task=1
@@ -136,7 +135,6 @@ run_mattergen_rank() {
     mattergen-train \
         "data_module=${DATA_MODULE}" \
         auto_resume=false \
-        checkpoint_path=null \
         trainer.devices=8 \
         "trainer.num_nodes=${SLURM_JOB_NUM_NODES}" \
         native_trainer.debug_ddp=true \
@@ -165,6 +163,7 @@ export RANK_LOG_DIR DATA_MODULE
 
 # A nonzero task exits the step promptly. Slurm stdout/stderr, Python
 # breadcrumbs, RCCL logs, and final status markers are all rank-specific.
+set +e
 srun \
     --ntasks="${SLURM_NTASKS}" \
     --ntasks-per-node=8 \
@@ -176,3 +175,26 @@ srun \
     --output="${RANK_LOG_DIR}/slurm-rank-%t-%N.out" \
     --error="${RANK_LOG_DIR}/slurm-rank-%t-%N.out" \
     bash -c run_mattergen_rank
+srun_rc=$?
+set -e
+
+if (( srun_rc != 0 )); then
+    echo "ERROR: srun failed with rc=${srun_rc}. Rank logs: ${RANK_LOG_DIR}" >&2
+
+    # Keep rank-local files for full diagnostics, but also surface one complete
+    # error tail in the main Slurm output so failures are not hidden behind the
+    # generic "tasks ... Exited with exit code" messages.
+    shopt -s nullglob
+    rank_output_files=("${RANK_LOG_DIR}"/slurm-rank-*.out)
+    shopt -u nullglob
+    for rank_output in "${rank_output_files[@]}"; do
+        if [[ -s "${rank_output}" ]]; then
+            echo "===== representative worker log: ${rank_output} (last 200 lines) =====" >&2
+            tail -n 200 "${rank_output}" >&2
+            break
+        fi
+    done
+
+    echo "Run: python analyze_jamie_test.py ${RANK_LOG_DIR}" >&2
+    exit "${srun_rc}"
+fi
