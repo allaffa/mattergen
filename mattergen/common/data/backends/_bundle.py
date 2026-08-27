@@ -49,7 +49,9 @@ def detect_format(cache_path: str) -> str:
 
     Raises :class:`FileNotFoundError` if no recognised cache file is present.
     """
-    if os.path.isfile(os.path.join(cache_path, _ADIOS_FILENAME)):
+    # ADIOS2 BP containers are regular files with some engines/versions and
+    # directories with others (including the local BP5 caches).
+    if os.path.exists(os.path.join(cache_path, _ADIOS_FILENAME)):
         return AdiosFormat
     if os.path.isfile(os.path.join(cache_path, _PICKLE_FILENAME)):
         return PickleFormat

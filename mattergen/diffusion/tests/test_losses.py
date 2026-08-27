@@ -215,6 +215,67 @@ def test_per_atom_mean_reduces_atom_fields_by_atom_count_and_dense_fields_by_bat
     torch.testing.assert_allclose(loss, expected_foo + expected_cell)
 
 
+def test_sum_reduction_uses_raw_rank_local_atom_and_cell_sums():
+    clean_batch = collate_fn(
+        [
+            {
+                "atomic_numbers": torch.ones(2, dtype=torch.long),
+                "foo": torch.randn(2, 3),
+                "cell": torch.randn(1, 3, 3),
+            },
+            {
+                "atomic_numbers": torch.ones(5, dtype=torch.long),
+                "foo": torch.randn(5, 3),
+                "cell": torch.randn(1, 3, 3),
+            },
+        ],
+        dense_field_names=("cell",),
+    )
+    multi_corruption = MultiCorruption(sdes={"foo": VESDE(), "cell": VESDE()})
+    t = torch.ones(clean_batch.get_batch_size())
+    noisy_batch = multi_corruption.sample_marginal(batch=clean_batch, t=t)
+    raw_noise = apply(
+        {k: compute_noise_given_sample_and_corruption for k in multi_corruption.corrupted_fields},
+        x=clean_batch,
+        x_noisy=noisy_batch,
+        corruption=multi_corruption.corruptions,
+        batch_idx=clean_batch.batch_idx,
+        broadcast={"t": t, "batch": clean_batch},
+    )
+    score_model_output = SimpleBatchedData(
+        data={k: torch.zeros_like(v) for k, v in clean_batch.data.items()},
+        batch_idx=clean_batch.batch_idx,
+    )
+    loss_fn = DenoisingScoreMatchingLoss(
+        model_targets={"foo": "score_times_std", "cell": "score_times_std"},
+        reduce="sum",
+    )
+
+    loss, fields = loss_fn(
+        batch=clean_batch,
+        multi_corruption=multi_corruption,
+        t=t,
+        score_model_output=score_model_output,
+        noisy_batch=noisy_batch,
+    )
+
+    expected_atoms = aggregate_per_sample(
+        raw_noise["foo"].square(),
+        batch_idx=clean_batch.batch_idx["foo"],
+        reduce="sum",
+        batch_size=clean_batch.get_batch_size(),
+    ).sum()
+    expected_cells = aggregate_per_sample(
+        raw_noise["cell"].square(),
+        batch_idx=None,
+        reduce="sum",
+        batch_size=clean_batch.get_batch_size(),
+    ).sum()
+    torch.testing.assert_close(fields["foo"], expected_atoms)
+    torch.testing.assert_close(fields["cell"], expected_cells)
+    torch.testing.assert_close(loss, expected_atoms + expected_cells)
+
+
 def test_wrapped_normal_loss(tiny_state_batch):
     # Simulate the case that wrapping has basically no effect and the loss is equivalent to DenoisingScoreMatchingLoss
     clean_batch = tiny_state_batch.replace(

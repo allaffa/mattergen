@@ -14,20 +14,30 @@ class CrystDataModule:
         train_dataset: CrystalDataset,
         num_workers: DictConfig,
         batch_size: DictConfig,
+        batching: DictConfig | None = None,
         val_dataset: CrystalDataset | None = None,
         test_dataset: CrystalDataset | None = None,
         **_,
     ):
         self.num_workers = num_workers
         self.batch_size = batch_size
+        self.batching = batching
 
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
         self.datasets = [train_dataset, val_dataset, test_dataset]
 
-    def train_dataloader(self, shuffle: bool = True) -> DataLoader:
-        loader, _ = build_split_dataloader(self, "train", distributed=False, shuffle=shuffle)
+    def train_dataloader(
+        self, shuffle: bool = True, use_streaming_batching: bool = True
+    ) -> DataLoader:
+        loader, _ = build_split_dataloader(
+            self,
+            "train",
+            distributed=False,
+            shuffle=shuffle,
+            use_streaming_batching=use_streaming_batching,
+        )
         assert loader is not None
         return loader
 

@@ -109,6 +109,90 @@ def _mean_reduce(value: torch.Tensor, distributed: bool) -> torch.Tensor:
     return value
 
 
+def _assert_equal_loader_lengths(loader: Any, device: torch.device, distributed: bool) -> None:
+    """Fail before training if a fixed-step sampler disagrees across ranks."""
+
+    sampler = getattr(loader, "batch_sampler", None)
+    if not getattr(sampler, "is_streaming_node_budget", False) or not distributed:
+        return
+    local_length = torch.tensor([len(loader)], dtype=torch.int64, device=device)
+    minimum = local_length.clone()
+    maximum = local_length.clone()
+    dist.all_reduce(minimum, op=dist.ReduceOp.MIN)
+    dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+    if int(minimum.item()) != int(maximum.item()):
+        raise RuntimeError(
+            "streaming_node_budget requires identical steps_per_epoch on all ranks; "
+            f"observed range [{int(minimum.item())}, {int(maximum.item())}]"
+        )
+
+
+def _log_streaming_statistics(
+    sampler: Any,
+    *,
+    device: torch.device,
+    distributed: bool,
+    rank: int,
+) -> None:
+    if not getattr(sampler, "is_streaming_node_budget", False):
+        return
+    stats = sampler.statistics()
+    sums = torch.tensor(
+        [
+            stats.emitted_samples,
+            stats.emitted_nodes,
+            stats.traversal_boundaries,
+            stats.deferred_samples,
+            stats.oversized_samples,
+            stats.skipped_samples,
+            stats.node_count_requests,
+            stats.node_count_cache_hits,
+            stats.sample_materializations,
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
+    limits = torch.tensor(
+        [stats.min_nodes, stats.max_nodes], dtype=torch.float64, device=device
+    )
+    utilization = torch.tensor(
+        [stats.mean_utilization], dtype=torch.float64, device=device
+    )
+    if distributed:
+        dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+        minimum = limits[:1].clone()
+        maximum = limits[1:].clone()
+        dist.all_reduce(minimum, op=dist.ReduceOp.MIN)
+        dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+        limits = torch.cat([minimum, maximum])
+        dist.all_reduce(utilization, op=dist.ReduceOp.SUM)
+        utilization /= dist.get_world_size()
+
+    if _is_rank_zero(rank):
+        values = sums.tolist()
+        logger.info(
+            "streaming_sampler epoch=%s steps_per_rank=%s source=%s graphs=%s "
+            "nodes=%s node_range=[%s,%s] utilization_mean=%.4f "
+            "traversal_boundaries=%s deferred=%s oversized=%s skipped=%s "
+            "count_requests=%s cache_hits=%s sample_materializations=%s",
+            stats.training_epoch,
+            stats.configured_steps,
+            stats.node_count_source,
+            int(values[0]),
+            int(values[1]),
+            int(limits[0].item()),
+            int(limits[1].item()),
+            float(utilization.item()),
+            int(values[2]),
+            int(values[3]),
+            int(values[4]),
+            int(values[5]),
+            int(values[6]),
+            int(values[7]),
+            int(values[8]),
+        )
+
+
 def _parse_optimizers(configured: Any) -> tuple[torch.optim.Optimizer, list[dict[str, Any]]]:
     if isinstance(configured, torch.optim.Optimizer):
         return configured, []
@@ -381,6 +465,16 @@ def fit(
     )
     if train_loader is None:
         raise ValueError("Native DDP requires a train dataloader.")
+    _assert_equal_loader_lengths(train_loader, device, distributed)
+    if (
+        ckpt_path is not None
+        and getattr(train_sampler, "is_streaming_node_budget", False)
+        and _is_rank_zero(rank)
+    ):
+        logger.warning(
+            "Checkpoint loading does not restore streaming sampler state; "
+            "training starts a fresh deterministic stream at the resumed epoch."
+        )
 
     val_loader, _ = build_split_dataloader(
         datamodule,
@@ -569,21 +663,40 @@ def fit(
 
             lr = optimizer.param_groups[0]['lr']
 
-            if _is_rank_zero(rank) and step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0:
-                logger.info(
-                    "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
-                    epoch,
-                    step_idx,
-                    lr,
-                    float(reduced_loss.item()),
-                    float(_metrics['pos'].item()),
-                    float(_metrics['cell'].item()),
-                    float(_metrics['atomic_numbers'].item()),
+            should_log = step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0
+            if should_log:
+                metric_keys = tuple(_metrics)
+                reduced_metric_values = _mean_reduce(
+                    torch.stack([_metrics[key].detach() for key in metric_keys]), distributed
                 )
-                if wandb_run is not None:
-                    wandb_run.log({"loss_train_step": float(reduced_loss.item()), "epoch": epoch})
+                reduced_metrics = dict(zip(metric_keys, reduced_metric_values))
+                if _is_rank_zero(rank):
+                    logger.info(
+                        "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
+                        epoch,
+                        step_idx,
+                        lr,
+                        float(reduced_loss.item()),
+                        float(reduced_metrics.get("pos", torch.tensor(float("nan"))).item()),
+                        float(reduced_metrics.get("cell", torch.tensor(float("nan"))).item()),
+                        float(
+                            reduced_metrics.get(
+                                "atomic_numbers", torch.tensor(float("nan"))
+                            ).item()
+                        ),
+                    )
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            {"loss_train_step": float(reduced_loss.item()), "epoch": epoch}
+                        )
 
         avg_train = train_loss_sum / max(train_steps, 1)
+        _log_streaming_statistics(
+            train_sampler,
+            device=device,
+            distributed=distributed,
+            rank=rank,
+        )
         val_loss = None
 
         lr = optimizer.param_groups[0]['lr']
@@ -649,6 +762,10 @@ def fit(
 
         if distributed:
             dist.barrier()
+
+    close_sampler = getattr(train_sampler, "close", None)
+    if callable(close_sampler):
+        close_sampler()
 
     ddp_utils.cleanup()
 

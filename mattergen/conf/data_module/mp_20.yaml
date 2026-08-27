@@ -51,4 +51,19 @@ batch_size:
   val: ${eval:'(64//8)'}
   test: ${eval:'(64//8)'}
 
+# Opt in with data_module.batching.mode=streaming_node_budget and set max_nodes.
+batching:
+  mode: fixed
+  max_nodes: null
+  target_nodes: null
+  steps_per_epoch: null
+  max_graphs: null
+  metadata_chunk_size: 32
+  metadata_cache_size: null
+  metadata_source: auto
+  forward_window: 1
+  shuffle: true
+  seed: 0
+  oversized_sample: error
+
 max_epochs: 900

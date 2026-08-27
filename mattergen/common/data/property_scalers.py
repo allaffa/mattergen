@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import inspect
 from typing import Any, TypeVar
 
 import torch
@@ -27,11 +28,18 @@ def compute_property_scalers(datamodule: Any, property_embeddings: torch.nn.Modu
     if len(property_names) == 0:
         return
 
-    train_loader = datamodule.train_dataloader()
-    for property_name in property_names:
-        for batch in tqdm(train_loader, desc=f"Fitting property {property_name} scalers"):
-                # concat all values in train dataset for this given property
-                property_values[property_name].append(batch[property_name])
+    # Property scalers must see the complete training split. A fixed-step
+    # streaming epoch is deliberately not a complete dataset traversal.
+    if "use_streaming_batching" in inspect.signature(
+        datamodule.train_dataloader
+    ).parameters:
+        train_loader = datamodule.train_dataloader(use_streaming_batching=False)
+    else:
+        train_loader = datamodule.train_dataloader()
+    for batch in tqdm(train_loader, desc="Fitting property scalers"):
+        for property_name in property_names:
+            # concat all values in train dataset for this given property
+            property_values[property_name].append(batch[property_name])
 
     for property_name in property_names:
         property_embeddings[property_name].fit_scaler(
