@@ -8,7 +8,8 @@
 #SBATCH -N 64
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-task=1
-#SBATCH --gpu-bind=none
+#SBATCH --gpu-bind=closest
+#SBATCH --network=disable_rdzv_get
 
 set -euo pipefail
 
@@ -46,8 +47,8 @@ export PROJECT_ROOT="${REPO_ROOT}"
 export OUTPUT_DIR="${REPO_ROOT}/outputs/JamieTest-${SLURM_JOB_ID}"
 
 export MASTER_ADDR
-MASTER_ADDR="$(scontrol show hostnames "${SLURM_NODELIST}" | sed -n '1p')"
-export MASTER_PORT="${MASTER_PORT:-29500}"
+MASTER_ADDR="$(hostname -i)"
+export MASTER_PORT="${MASTER_PORT:-3442}"
 
 export OMP_NUM_THREADS=7
 export PYTHONUNBUFFERED=1
@@ -73,17 +74,16 @@ done
 export LD_LIBRARY_PATH="${filtered_ld_library_path}"
 module load rccl-net-plugin
 
-# First-pass diagnostics use the matched plugin with no hand-tuned FI/CXI/GDR
-# overrides. RCCL writes one detailed log per process.
-unset FI_MR_CACHE_MONITOR FI_CXI_RDV_PROTO FI_CXI_DEFAULT_CQ_SIZE
-unset FI_CXI_DEFAULT_TX_SIZE FI_CXI_RX_MATCH_MODE NCCL_NET_GDR_LEVEL
+# Preserve every Slingshot/libfabric setting supplied by rccl-net-plugin. Force
+# OFI so a missing multi-node network plugin fails instead of using sockets.
+export NCCL_NET=OFI
 export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,ENV,NET,GRAPH
 export NCCL_DEBUG_FILE="${RANK_LOG_DIR}/rccl-%h-%p.log"
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_DUMP_ON_TIMEOUT=1
-export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
+export TORCH_FR_BUFFER_SIZE=2000
 
 echo "repo=${REPO_ROOT}"
 echo "python=$(command -v python)"
@@ -91,6 +91,10 @@ echo "conda_prefix=${CONDA_PREFIX:-<unset>}"
 echo "job=${SLURM_JOB_ID} nodes=${SLURM_JOB_NUM_NODES} tasks=${SLURM_NTASKS}"
 echo "master=${MASTER_ADDR}:${MASTER_PORT} data_module=${DATA_MODULE}"
 echo "rank_logs=${RANK_LOG_DIR}"
+echo "rccl_net=${NCCL_NET} rccl_net_plugin=${NCCL_NET_PLUGIN:-<module/default>}"
+echo "gpu_visibility_before_srun: ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<set-by-slurm-per-task>} HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-<unset>} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "effective Frontier network environment:"
+env | LC_ALL=C sort | grep -E '^(NCCL_|FI_CXI_|FI_MR_)' || true
 module list
 
 python - <<'PY'
@@ -123,7 +127,11 @@ run_mattergen_rank() {
     local rc
     host="$(hostname)"
 
-    export ROCR_VISIBLE_DEVICES="${SLURM_LOCALID}"
+    # Slurm's closest binding exposes the topology-correct GPU as cuda:0.
+    printf 'gpu_binding rank=%s local_rank=%s host=%s ROCR_VISIBLE_DEVICES=%s HIP_VISIBLE_DEVICES=%s CUDA_VISIBLE_DEVICES=%s\n' \
+        "${rank}" "${local_rank}" "${host}" \
+        "${ROCR_VISIBLE_DEVICES:-<unset>}" "${HIP_VISIBLE_DEVICES:-<unset>}" \
+        "${CUDA_VISIBLE_DEVICES:-<unset>}"
     # One node-local Matplotlib cache per node prevents hundreds of ranks from
     # contending on the shared home-directory font cache during imports.
     export MPLCONFIGDIR="/tmp/matplotlib-${SLURM_JOB_ID}"
@@ -173,7 +181,7 @@ srun \
     --ntasks-per-node=8 \
     --cpus-per-task=7 \
     --gpus-per-task=1 \
-    --gpu-bind=none \
+    --gpu-bind=closest \
     --kill-on-bad-exit=1 \
     --wait=30 \
     --output="${RANK_LOG_DIR}/slurm-rank-%t-%N.out" \
