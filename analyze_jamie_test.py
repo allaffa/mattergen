@@ -221,6 +221,36 @@ def build_report(log_dir: Path, max_error_lines: int):
         "Last trace stage by rank count:",
     ]
     lines.extend(f"  {stage}: {count}" for stage, count in stages.most_common())
+
+    lines.extend(["", "Trace-stage placement:"])
+    records_by_host: dict[str, list[RankRecord]] = defaultdict(list)
+    for record in records.values():
+        records_by_host[record.host].append(record)
+    for stage, count in stages.most_common():
+        stage_records = sorted(
+            (record for record in records.values() if record.last_stage == stage),
+            key=lambda record: record.rank,
+        )
+        local_ranks = Counter(
+            record.status.get("local_rank", "?") for record in stage_records
+        )
+        stage_hosts = sorted({record.host for record in stage_records})
+        uniform_hosts = sorted(
+            host
+            for host in stage_hosts
+            if all(record.last_stage == stage for record in records_by_host[host])
+        )
+        lines.append(
+            f"  {stage}: count={count} hosts={len(stage_hosts)} "
+            f"uniform_hosts={len(uniform_hosts)} "
+            f"local_ranks={dict(sorted(local_ranks.items()))}"
+        )
+        lines.append(
+            f"    ranks={compact_ranges([record.rank for record in stage_records])}"
+        )
+        if uniform_hosts:
+            lines.append(f"    uniform_host_names={','.join(uniform_hosts)}")
+
     lines.extend(["", "Log sizes:"])
     lines.extend(f"  {kind}: {human_size(size)}" for kind, size in sorted(sizes.items()))
     lines.extend(["", f"Error signatures: {dict(error_counts)}"])

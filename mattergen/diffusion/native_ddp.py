@@ -422,14 +422,23 @@ def fit(
 
     trace_rank("before_device_binding", local_rank=local_rank)
     device = ddp_utils.resolve_device(local_rank)
-    trace_rank("after_device_binding", device=str(device))
+    trace_rank(
+        "after_device_binding",
+        device=str(device),
+        device_count=torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        device_name=(torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu"),
+        rocr_visible_devices=os.getenv("ROCR_VISIBLE_DEVICES"),
+        slurm_localid=os.getenv("SLURM_LOCALID"),
+    )
     trace_rank("before_model_to_device")
     model_module = model_module.to(device)
     trace_rank("after_model_to_device")
     diffusion_module = model_module.diffusion_module
     model = diffusion_module
 
+    trace_rank("before_first_param_stats")
     first_name, first_mean, first_norm = _first_param_stats(model)
+    trace_rank("after_first_param_stats")
     logger.info(
         "%s pre-DDP first param: %s mean=%.6e norm=%.6e device=%s",
         _rank_prefix(rank),
