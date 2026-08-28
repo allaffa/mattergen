@@ -3,7 +3,7 @@
 #SBATCH -J JamieTest
 #SBATCH -o JamieTest-%j.out
 #SBATCH -e JamieTest-%j.out
-#SBATCH -t 00:10:00
+#SBATCH -t 01:00:00
 #SBATCH -q debug
 #SBATCH -N 64
 #SBATCH --ntasks-per-node=8
@@ -301,6 +301,12 @@ run_mattergen_rank() {
 }
 export -f run_mattergen_rank
 export RANK_LOG_DIR DATA_MODULE
+
+# So that it doesn't hang
+module unload rccl-net-plugin 2>/dev/null || true
+unset NCCL_NET_PLUGIN
+export NCCL_NET=Socket
+export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
 
 # A nonzero task exits the step promptly. Slurm stdout/stderr, Python
 # breadcrumbs, RCCL logs, and final status markers are all rank-specific.
