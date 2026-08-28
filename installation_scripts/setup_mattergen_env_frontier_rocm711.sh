@@ -208,6 +208,9 @@ expected_distributions = {
     "torch-sparse-rocm": "0.6.18.post2",
     "torch-cluster-rocm": "1.6.3.post2",
     "adios2": "2.10.2.100774",
+    "emmet-core": "0.85.1",
+    "pymatgen": "2024.10.29",
+    "monty": "2024.7.30",
 }
 for distribution, expected_version in expected_distributions.items():
     installed_version = metadata.version(distribution)
@@ -220,6 +223,7 @@ for distribution, expected_version in expected_distributions.items():
 for conflicting_distribution in (
     "pyg-lib",
     "pyg-lib-rocm",
+    "pymatgen-core",
     "torch-scatter",
     "torch-sparse",
     "torch-cluster",
@@ -234,6 +238,13 @@ for conflicting_distribution in (
         f"conflicting distribution is installed: "
         f"{conflicting_distribution}=={installed_version}"
     )
+
+# emmet-core 0.85.1 uses pymatgen.analysis.graphs. Import these symbols
+# explicitly so the 0.87.x/pymatgen.core.graphs incompatibility is caught
+# before the environment is packed and submitted to hundreds of ranks.
+print("verify emmet-core/pymatgen compatibility", flush=True)
+from emmet.core.material import PropertyOrigin
+from pymatgen.analysis.graphs import MoleculeGraph, StructureGraph
 
 print("import torch_scatter", flush=True)
 import torch_scatter

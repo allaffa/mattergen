@@ -9,3 +9,10 @@ torch-scatter-rocm==2.1.2.post2
 torch-sparse-rocm==0.6.18.post2
 torch-cluster-rocm==1.6.3.post2
 adios2==2.10.2.100774
+
+# emmet-core 0.87.x resolves StructureGraph/MoleculeGraph through the newer
+# pymatgen.core.graphs module, which is not present in this known-working
+# MatterGen pymatgen stack. Keep the combination used by mattergen-native.
+emmet-core==0.85.1
+pymatgen==2024.10.29
+monty==2024.7.30
