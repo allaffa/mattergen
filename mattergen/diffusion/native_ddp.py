@@ -92,6 +92,45 @@ def _ddp_collective_sanity(device: torch.device, rank: int, world_size: int) -> 
     )
 
 
+def _ddp_all_gather_preflight(
+    device: torch.device,
+    rank: int,
+    world_size: int,
+) -> None:
+    """Exercise the small all-gather used by DDP before wrapping the model."""
+
+    local_rank = torch.tensor([rank], dtype=torch.int64, device=device)
+    gathered_ranks = torch.empty(world_size, dtype=torch.int64, device=device)
+    trace_rank(
+        "before_pre_ddp_all_gather",
+        input_bytes=local_rank.numel() * local_rank.element_size(),
+        gathered_bytes=gathered_ranks.numel() * gathered_ranks.element_size(),
+        world_size=world_size,
+    )
+    dist.all_gather_into_tensor(gathered_ranks, local_rank)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+    expected = torch.arange(world_size, dtype=torch.int64, device=device)
+    if not torch.equal(gathered_ranks, expected):
+        raise RuntimeError(
+            "pre-DDP all_gather returned unexpected ranks: "
+            f"{gathered_ranks.cpu().tolist()}"
+        )
+    trace_rank(
+        "after_pre_ddp_all_gather",
+        gathered_bytes=gathered_ranks.numel() * gathered_ranks.element_size(),
+        world_size=world_size,
+    )
+    if _selected_rank(rank, world_size):
+        logger.info(
+            "%s pre-DDP all_gather validated %d ranks (%d bytes)",
+            _rank_prefix(rank),
+            world_size,
+            gathered_ranks.numel() * gathered_ranks.element_size(),
+        )
+
+
 def _is_rank_zero(rank: int) -> bool:
     return rank == 0
 
@@ -413,6 +452,7 @@ def fit(
     trace_rank("after_ddp_setup", rank=rank, world_size=world_size)
     distributed = world_size > 1
     local_rank = ddp_utils.get_local_rank() if distributed else None
+    debug_ddp = bool(native_cfg.get("debug_ddp", False))
 
     if distributed:
         logger.info("%s world_size=%s local_rank=%s", _rank_prefix(rank), world_size, local_rank)
@@ -430,6 +470,9 @@ def fit(
         rocr_visible_devices=os.getenv("ROCR_VISIBLE_DEVICES"),
         slurm_localid=os.getenv("SLURM_LOCALID"),
     )
+    if distributed and debug_ddp:
+        _ddp_all_gather_preflight(device, rank, world_size)
+
     trace_rank("before_model_to_device")
     model_module = model_module.to(device)
     trace_rank("after_model_to_device")
@@ -471,8 +514,12 @@ def fit(
     trace_rank("after_ddp_wrap")
 
     if distributed:
+        trace_rank("before_post_ddp_barrier")
         dist.barrier()
+        trace_rank("after_post_ddp_barrier")
+        trace_rank("before_post_ddp_all_reduce")
         _ddp_collective_sanity(device, rank, world_size)
+        trace_rank("after_post_ddp_all_reduce")
         _log_model_sync(model.module, rank, world_size, tag="after_ddp_wrap")
 
 
@@ -586,7 +633,6 @@ def fit(
             if step_idx == 0:
                 trace_rank("after_first_forward")
 
-            debug_ddp = bool(native_cfg.get("debug_ddp", False))
             debug_steps = int(native_cfg.get("debug_ddp_steps", 2))
 
             if debug_ddp and step_idx < debug_steps:

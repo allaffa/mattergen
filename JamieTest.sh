@@ -77,8 +77,11 @@ module load rccl-net-plugin
 # Preserve every Slingshot/libfabric setting supplied by rccl-net-plugin. Force
 # OFI so a missing multi-node network plugin fails instead of using sockets.
 export NCCL_NET=OFI
+# Work around the ROCm 7.2 illegal-instruction failure seen in the first 4 KiB
+# collective at 512 ranks without constraining RCCL's topology algorithm.
+export NCCL_PROTO=Simple
 export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=INIT,ENV,NET,GRAPH
+export NCCL_DEBUG_SUBSYS=INIT,ENV,NET,GRAPH,COLL
 export NCCL_DEBUG_FILE="${RANK_LOG_DIR}/rccl-%h-%p.log"
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1

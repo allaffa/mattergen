@@ -24,15 +24,36 @@ PID_RE = re.compile(r"\bpid=(\d+)")
 
 ERROR_PATTERNS = {
     "SIGBUS": re.compile(r"SIGBUS|Bus error|signal(?:\s+|=)7\b", re.IGNORECASE),
+    "SIGABRT": re.compile(
+        r"SIGABRT|Fatal Python error:\s*Aborted|signal(?:\s+|=)6\b|"
+        r"Exited with exit code 134\b",
+        re.IGNORECASE,
+    ),
+    "illegal GPU instruction": re.compile(
+        r"HSA_STATUS_ERROR_ILLEGAL_INSTRUCTION|illegal shader instruction",
+        re.IGNORECASE,
+    ),
     "timeout": re.compile(r"timed?\s*out|timeout|watchdog", re.IGNORECASE),
     "collective error": re.compile(
-        r"NCCL.*(?:error|abort|fail)|RCCL.*(?:error|abort|fail)|collective.*(?:error|fail)",
+        r"(?:NCCL|RCCL).*(?:\bWARN\b|\bERROR\b|unhandled|abort(?:ed)?|"
+        r"system error|internal error)|collective.*(?:error|fail)",
         re.IGNORECASE,
     ),
     "traceback": re.compile(r"Traceback \(most recent call last\)", re.IGNORECASE),
     "segfault": re.compile(r"SIGSEGV|segmentation fault", re.IGNORECASE),
     "out of memory": re.compile(r"out of memory|OOM", re.IGNORECASE),
 }
+
+BENIGN_PLUGIN_PATTERNS = (
+    re.compile(
+        r"NCCL INFO (?:NET|TUNER)/Plugin: (?:Failed to find|Could not find)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"NCCL INFO PROFILER/Plugin: Could not find",
+        re.IGNORECASE,
+    ),
+)
 
 
 @dataclass
@@ -60,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=80,
         help="maximum matching error lines included in the summary",
+    )
+    parser.add_argument(
+        "--max-suspect-ranks",
+        type=int,
+        default=32,
+        help="maximum detailed suspect-rank records included in the summary",
     )
     return parser.parse_args()
 
@@ -164,6 +191,8 @@ def scan_errors(
         try:
             with path.open(errors="replace") as stream:
                 for line_number, line in enumerate(stream, 1):
+                    if any(pattern.search(line) for pattern in BENIGN_PLUGIN_PATTERNS):
+                        continue
                     labels = [label for label, pattern in ERROR_PATTERNS.items() if pattern.search(line)]
                     if not labels:
                         continue
@@ -182,7 +211,11 @@ def scan_errors(
     return counts, samples, error_files, error_ranks
 
 
-def build_report(log_dir: Path, max_error_lines: int):
+def build_report(
+    log_dir: Path,
+    max_error_lines: int,
+    max_suspect_ranks: int = 32,
+):
     records, pid_to_rank = load_rank_records(log_dir)
     log_paths = sorted(
         path
@@ -258,7 +291,8 @@ def build_report(log_dir: Path, max_error_lines: int):
     suspect_ranks = sorted(set(failed) | error_ranks)
     if suspect_ranks:
         lines.extend(["", "Suspect ranks:"])
-        for rank in suspect_ranks:
+        shown_suspect_ranks = suspect_ranks[: max(0, max_suspect_ranks)]
+        for rank in shown_suspect_ranks:
             record = records.get(rank, RankRecord(rank=rank))
             status_details = " ".join(
                 f"{key}={value}"
@@ -267,6 +301,12 @@ def build_report(log_dir: Path, max_error_lines: int):
             )
             lines.append(
                 f"  rank={rank} last_stage={record.last_stage} {status_details}".rstrip()
+            )
+        omitted = len(suspect_ranks) - len(shown_suspect_ranks)
+        if omitted:
+            lines.append(
+                f"  ... {omitted} additional suspect ranks omitted "
+                f"(use --max-suspect-ranks to show more)"
             )
 
     if error_samples:
@@ -322,7 +362,7 @@ def main() -> None:
         raise SystemExit(f"Log directory does not exist: {log_dir}")
 
     report, records, error_files, error_ranks = build_report(
-        log_dir, args.max_error_lines
+        log_dir, args.max_error_lines, args.max_suspect_ranks
     )
     summary_path = log_dir / "analysis-summary.txt"
     summary_path.write_text(report)
