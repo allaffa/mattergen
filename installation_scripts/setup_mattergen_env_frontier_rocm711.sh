@@ -20,7 +20,7 @@ Options:
   -h, --help           Show this help message.
 
 The default environment is:
-  /lustre/orion/lrn070/proj-shared/zb7/envs/mattergen-rocm711
+  /lustre/orion/lrn070/proj-shared/$USER/envs/mattergen-rocm711
 
 MATTERGEN_ENV_PATH may also set the environment path.
 MATTERGEN_ENV_ARCHIVE may set the archive path. By default it is ENV_PATH.tar.gz.
@@ -29,7 +29,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn070/proj-shared/zb7/envs/mattergen-rocm711}"
+ENV_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn070/proj-shared/${USER}/envs/mattergen-rocm711}"
 ARCHIVE_PATH="${MATTERGEN_ENV_ARCHIVE:-}"
 RECREATE=0
 

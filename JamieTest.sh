@@ -20,7 +20,7 @@ REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
 SCRIPT_DIR="${REPO_ROOT}/installation_scripts"
 # The setup script creates this archive. It is broadcast once per node and
 # unpacked onto Frontier's NVMe before Python starts.
-ENV_SOURCE_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn070/proj-shared/zb7/envs/mattergen-rocm711}"
+ENV_SOURCE_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn070/proj-shared/${USER}/envs/mattergen-rocm711}"
 ENV_ARCHIVE="${MATTERGEN_ENV_ARCHIVE:-${ENV_SOURCE_PATH}.tar.gz}"
 LOCAL_ENV_ROOT="/mnt/bb/${USER}/mattergen-rocm711-${SLURM_JOB_ID}"
 LOCAL_ENV_ARCHIVE="${LOCAL_ENV_ROOT}.tar.gz"
@@ -100,8 +100,7 @@ export MIOPEN_USER_DB_PATH="/tmp/miopen-${SLURM_JOB_ID}"
 export MIOPEN_CUSTOM_CACHE_DIR="${MIOPEN_USER_DB_PATH}"
 mkdir -p "${MIOPEN_USER_DB_PATH}"
 
-# Use Frontier's module-provided RCCL network plugin. In particular, do not
-# prepend the legacy ROCm 6.3.1 aws-ofi-rccl build used by submit.sh.
+# Do not prepend the legacy ROCm 6.3.1 aws-ofi-rccl build used by submit.sh.
 unset PATH_TO_THE_PLUGIN_DIRECTORY
 filtered_ld_library_path=""
 IFS=: read -r -a ld_library_entries <<< "${LD_LIBRARY_PATH:-}"
@@ -111,11 +110,14 @@ for entry in "${ld_library_entries[@]}"; do
     fi
 done
 export LD_LIBRARY_PATH="${filtered_ld_library_path}"
-module load rccl-net-plugin
 
-# Preserve every Slingshot/libfabric setting supplied by rccl-net-plugin. Force
-# OFI so a missing multi-node network plugin fails instead of using sockets.
-export NCCL_NET=OFI
+# The ROCm 7.1.1 training test reached forward/backward reliably with RCCL's
+# socket transport, while the OFI plugin hung during a small DDP broadcast.
+# Force the proven transport and restrict it to Frontier's Slingshot NICs.
+module unload rccl-net-plugin 2>/dev/null || true
+unset NCCL_NET_PLUGIN
+export NCCL_NET=Socket
+export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
 # Do not inherit diagnostic overrides from the submission shell. Let RCCL's
 # internal tuner choose the protocol and algorithm for each collective.
 unset NCCL_PROTO NCCL_ALGO
@@ -301,12 +303,6 @@ run_mattergen_rank() {
 }
 export -f run_mattergen_rank
 export RANK_LOG_DIR DATA_MODULE
-
-# So that it doesn't hang
-module unload rccl-net-plugin 2>/dev/null || true
-unset NCCL_NET_PLUGIN
-export NCCL_NET=Socket
-export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
 
 # A nonzero task exits the step promptly. Slurm stdout/stderr, Python
 # breadcrumbs, RCCL logs, and final status markers are all rank-specific.
