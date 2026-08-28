@@ -1,5 +1,11 @@
 # Keep backend packages on OLCF's recommended PyTorch 2.10/ROCm 7.1 stack
-# while pip resolves MatterGen's remaining runtime dependencies.
+# while pip resolves MatterGen's remaining runtime dependencies. The post2
+# PyG wheels are the builds published for PyTorch 2.10 on 2026-01-31.
 torch==2.10.0
 torchvision==0.25.0
 torchaudio==2.10.0
+torch-geometric==2.7.0
+torch-scatter-rocm==2.1.2.post2
+torch-sparse-rocm==0.6.18.post2
+torch-cluster-rocm==1.6.3.post2
+adios2==2.10.2.100774

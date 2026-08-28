@@ -105,20 +105,14 @@ python -m pip install \
     torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 \
     --index-url https://download.pytorch.org/whl/rocm7.1
 
-# These are OLCF's binary PyG packages for PyTorch 2.10/ROCm 7.1.1. They
-# provide the standard torch_geometric/torch_scatter/etc. import names.
-python -m pip install \
-    --constraint "${SCRIPT_DIR}/frontier-rocm711-constraints.txt" \
-    torch-geometric torch-sparse-rocm torch-spline-conv-rocm \
-    torch-scatter-rocm torch-cluster-rocm pyg-lib-rocm
-
 python -m pip install \
     --constraint "${SCRIPT_DIR}/frontier-rocm711-constraints.txt" \
     --only-binary=:all: \
     adios2==2.10.2.100774
 
-# Install MatterGen's regular runtime dependencies without letting its generic
-# torch/PyG requirements replace the Frontier-specific wheels above.
+# Install MatterGen's regular runtime dependencies before the compiled PyG
+# extensions. The backend exclusions prevent MatterGen's generic CUDA/CPU PyG
+# requirements from taking precedence over the Frontier-specific ROCm wheels.
 python - "${SCRIPT_DIR}/frontier-rocm711-constraints.txt" <<'PY'
 from pathlib import Path
 import subprocess
@@ -167,6 +161,31 @@ subprocess.check_call(
 )
 PY
 
+# torch-geometric itself is pure Python. Install it with its normal runtime
+# dependencies, then remove every potentially overlapping compiled PyG
+# distribution before installing the ABI-matched ROCm wheels last.
+python -m pip install \
+    --constraint "${SCRIPT_DIR}/frontier-rocm711-constraints.txt" \
+    torch-geometric==2.7.0
+
+python -m pip uninstall --yes \
+    pyg-lib pyg-lib-rocm \
+    torch-scatter torch-scatter-rocm \
+    torch-sparse torch-sparse-rocm \
+    torch-cluster torch-cluster-rocm \
+    torch-spline-conv torch-spline-conv-rocm
+
+# These post2 wheels were published for PyTorch 2.10 and provide the standard
+# torch_scatter/torch_sparse/torch_cluster import names on ROCm. MatterGen does
+# not require pyg-lib or torch-spline-conv, so neither is installed.
+python -m pip install \
+    --no-deps \
+    --only-binary=:all: \
+    --constraint "${SCRIPT_DIR}/frontier-rocm711-constraints.txt" \
+    torch-scatter-rocm==2.1.2.post2 \
+    torch-sparse-rocm==0.6.18.post2 \
+    torch-cluster-rocm==1.6.3.post2
+
 # Install a non-editable copy only to provide MatterGen's console entry points
 # inside the packed environment. JamieTest.sh sets PYTHONPATH to REPO_ROOT, so
 # training always imports the user's current checkout after staging.
@@ -175,20 +194,82 @@ python -m pip install --no-deps "${REPO_ROOT}"
 export REPO_ROOT
 export PYTHONPATH="${REPO_ROOT}"
 python - <<'PY'
+from importlib import metadata
 import os
 from pathlib import Path
 import sys
 
 import adios2
+import torch
+
+expected_distributions = {
+    "torch-geometric": "2.7.0",
+    "torch-scatter-rocm": "2.1.2.post2",
+    "torch-sparse-rocm": "0.6.18.post2",
+    "torch-cluster-rocm": "1.6.3.post2",
+    "adios2": "2.10.2.100774",
+}
+for distribution, expected_version in expected_distributions.items():
+    installed_version = metadata.version(distribution)
+    if installed_version != expected_version:
+        raise SystemExit(
+            f"expected {distribution} {expected_version}, found {installed_version}"
+        )
+    print("distribution", distribution, installed_version, flush=True)
+
+for conflicting_distribution in (
+    "pyg-lib",
+    "pyg-lib-rocm",
+    "torch-scatter",
+    "torch-sparse",
+    "torch-cluster",
+    "torch-spline-conv",
+    "torch-spline-conv-rocm",
+):
+    try:
+        installed_version = metadata.version(conflicting_distribution)
+    except metadata.PackageNotFoundError:
+        continue
+    raise SystemExit(
+        f"conflicting distribution is installed: "
+        f"{conflicting_distribution}=={installed_version}"
+    )
+
+print("import torch_scatter", flush=True)
+import torch_scatter
+print("import torch_sparse", flush=True)
+import torch_sparse
+print("import torch_cluster", flush=True)
+import torch_cluster
+print("import torch_geometric", flush=True)
+import torch_geometric
+
+
+def verify_scatter(device: str) -> None:
+    source = torch.tensor([1.0, 2.0, 3.0], device=device)
+    index = torch.tensor([0, 1, 0], dtype=torch.long, device=device)
+    result = torch_scatter.scatter(
+        source, index, dim=0, dim_size=2, reduce="sum"
+    )
+    expected = torch.tensor([4.0, 2.0], device=device)
+    if device == "cuda":
+        torch.cuda.synchronize()
+    if not torch.equal(result.cpu(), expected.cpu()):
+        raise SystemExit(
+            f"torch_scatter produced an incorrect {device} result: {result}"
+        )
+    print("torch_scatter", device, "verification passed", flush=True)
+
+
+verify_scatter("cpu")
+if torch.cuda.is_available():
+    verify_scatter("cuda")
+else:
+    print("ROCm GPU verification deferred to JamieTest.sh batch preflight", flush=True)
+
+print("import local MatterGen checkout", flush=True)
 import mattergen
 import mattergen.scripts.run
-import pyg_lib
-import torch
-import torch_cluster
-import torch_geometric
-import torch_scatter
-import torch_sparse
-import torch_spline_conv
 
 expected_repo = Path(os.environ["REPO_ROOT"]).resolve()
 mattergen_file = Path(mattergen.__file__).resolve()

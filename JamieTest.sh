@@ -141,12 +141,81 @@ env | LC_ALL=C sort | grep -E '^(NCCL_|FI_CXI_|FI_MR_)' || true
 module list
 
 python - <<'PY'
+from importlib import metadata
 import os
 from pathlib import Path
+import sys
 
 import adios2
-import mattergen
 import torch
+
+expected_distributions = {
+    "torch-geometric": "2.7.0",
+    "torch-scatter-rocm": "2.1.2.post2",
+    "torch-sparse-rocm": "0.6.18.post2",
+    "torch-cluster-rocm": "1.6.3.post2",
+    "adios2": "2.10.2.100774",
+}
+for distribution, expected_version in expected_distributions.items():
+    installed_version = metadata.version(distribution)
+    if installed_version != expected_version:
+        raise SystemExit(
+            f"ERROR: expected {distribution} {expected_version}, "
+            f"found {installed_version}"
+        )
+    print("distribution", distribution, installed_version, flush=True)
+
+for conflicting_distribution in (
+    "pyg-lib",
+    "pyg-lib-rocm",
+    "torch-scatter",
+    "torch-sparse",
+    "torch-cluster",
+    "torch-spline-conv",
+    "torch-spline-conv-rocm",
+):
+    try:
+        installed_version = metadata.version(conflicting_distribution)
+    except metadata.PackageNotFoundError:
+        continue
+    raise SystemExit(
+        f"ERROR: conflicting distribution is installed: "
+        f"{conflicting_distribution}=={installed_version}"
+    )
+
+print("import torch_scatter", flush=True)
+import torch_scatter
+print("import torch_sparse", flush=True)
+import torch_sparse
+print("import torch_cluster", flush=True)
+import torch_cluster
+print("import torch_geometric", flush=True)
+import torch_geometric
+
+
+def verify_scatter(device: str) -> None:
+    source = torch.tensor([1.0, 2.0, 3.0], device=device)
+    index = torch.tensor([0, 1, 0], dtype=torch.long, device=device)
+    result = torch_scatter.scatter(
+        source, index, dim=0, dim_size=2, reduce="sum"
+    )
+    expected = torch.tensor([4.0, 2.0], device=device)
+    if device == "cuda":
+        torch.cuda.synchronize()
+    if not torch.equal(result.cpu(), expected.cpu()):
+        raise SystemExit(
+            f"ERROR: torch_scatter produced an incorrect {device} result: {result}"
+        )
+    print("torch_scatter", device, "verification passed", flush=True)
+
+
+verify_scatter("cpu")
+if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+    raise SystemExit("ERROR: no ROCm GPU is visible in the batch allocation")
+verify_scatter("cuda")
+
+print("import local MatterGen checkout", flush=True)
+import mattergen
 
 repo_root = Path(os.environ["REPO_ROOT"]).resolve()
 mattergen_file = Path(mattergen.__file__).resolve()
@@ -159,11 +228,15 @@ except ValueError:
     )
 
 print("mattergen", mattergen_file)
+print("python", sys.version.split()[0], sys.executable)
 print("torch", torch.__version__, "HIP", torch.version.hip)
 print("adios2", adios2.__version__, adios2.__file__)
+print("torch_geometric", torch_geometric.__version__)
 
 torch_release = torch.__version__.split("+", 1)[0]
 hip_release = torch.version.hip or ""
+if sys.version_info[:2] != (3, 12):
+    raise SystemExit(f"ERROR: expected Python 3.12, found {sys.version.split()[0]}")
 if torch_release != "2.10.0":
     raise SystemExit(f"ERROR: expected torch 2.10.0, found {torch.__version__}")
 if not hip_release.startswith("7.1"):
@@ -174,8 +247,6 @@ if not adios2.__version__.startswith("2.10.2"):
     )
 if not torch.distributed.is_nccl_available():
     raise SystemExit("ERROR: PyTorch was installed without RCCL/NCCL support")
-if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
-    raise SystemExit("ERROR: no ROCm GPU is visible in the batch allocation")
 PY
 
 run_mattergen_rank() {
