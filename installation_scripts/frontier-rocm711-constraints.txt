@@ -1,0 +1,5 @@
+# Keep backend packages on OLCF's recommended PyTorch 2.10/ROCm 7.1 stack
+# while pip resolves MatterGen's remaining runtime dependencies.
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
