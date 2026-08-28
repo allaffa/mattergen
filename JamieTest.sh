@@ -10,6 +10,7 @@
 #SBATCH --gpus-per-task=1
 #SBATCH --gpu-bind=closest
 #SBATCH --network=disable_rdzv_get
+#SBATCH -C nvme
 
 set -euo pipefail
 
@@ -17,9 +18,12 @@ set -euo pipefail
 # the matched 256-rank test; task counts are always derived from the allocation.
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
 SCRIPT_DIR="${REPO_ROOT}/installation_scripts"
-# This is the ROCm 7.2 environment used by the known-working Frontier job.
-# MATTERGEN_ENV_PATH can override it without editing this script.
-ENV_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn070/proj-shared/patxi/envs/HydraGNN-Installation-Frontier/hydragnn_venv}"
+# The setup script creates this archive. It is broadcast once per node and
+# unpacked onto Frontier's NVMe before Python starts.
+ENV_SOURCE_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn070/proj-shared/zb7/envs/mattergen-rocm711}"
+ENV_ARCHIVE="${MATTERGEN_ENV_ARCHIVE:-${ENV_SOURCE_PATH}.tar.gz}"
+LOCAL_ENV_ROOT="/mnt/bb/${USER}/mattergen-rocm711-${SLURM_JOB_ID}"
+LOCAL_ENV_ARCHIVE="${LOCAL_ENV_ROOT}.tar.gz"
 DATA_MODULE="${DATA_MODULE:-OMat24-v2}"
 RANK_LOG_DIR="${REPO_ROOT}/jobOutputs/JamieTest-${SLURM_JOB_ID}"
 
@@ -29,19 +33,54 @@ cd "${REPO_ROOT}"
     exit 1
 }
 mkdir -p "${RANK_LOG_DIR}"
+[[ -s "${ENV_ARCHIVE}" ]] || {
+    echo "ERROR: packed MatterGen environment not found: ${ENV_ARCHIVE}" >&2
+    echo "Run installation_scripts/setup_mattergen_env_frontier_rocm711.sh first." >&2
+    exit 1
+}
 
 # Do not let a Conda environment inherited from the submission shell affect
 # module loading or activation of the known-working shared environment.
 unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE \
     CONDA_PROMPT_MODIFIER 2>/dev/null || true
+unset PYTHONHOME 2>/dev/null || true
+export PYTHONNOUSERSITE=1
 
-# Load the same ROCm 7.2 stack and environment as the working reference job.
+# Load OLCF's recommended PyTorch 2.10/ROCm 7.1.1 stack.
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/module-to-load-frontier-rocm720.sh"
+source "${SCRIPT_DIR}/module-to-load-frontier-rocm711.sh"
 eval "$(conda shell.bash hook)"
-conda activate "${ENV_PATH}"
 
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+echo "Broadcasting ${ENV_ARCHIVE} to node-local NVMe"
+if ! sbcast -pf "${ENV_ARCHIVE}" "${LOCAL_ENV_ARCHIVE}"; then
+    echo "ERROR: sbcast failed; refusing to use a potentially partial archive." >&2
+    exit 1
+fi
+
+# One task per node creates and relocates its local copy. All nodes use the
+# same path, so activation in the batch shell exports a valid path to srun.
+srun \
+    --nodes="${SLURM_JOB_NUM_NODES}" \
+    --ntasks="${SLURM_JOB_NUM_NODES}" \
+    --ntasks-per-node=1 \
+    mkdir -p "${LOCAL_ENV_ROOT}"
+srun \
+    --nodes="${SLURM_JOB_NUM_NODES}" \
+    --ntasks="${SLURM_JOB_NUM_NODES}" \
+    --ntasks-per-node=1 \
+    --cpus-per-task=56 \
+    tar --use-compress-program=pigz -xf "${LOCAL_ENV_ARCHIVE}" -C "${LOCAL_ENV_ROOT}"
+
+conda activate "${LOCAL_ENV_ROOT}"
+srun \
+    --nodes="${SLURM_JOB_NUM_NODES}" \
+    --ntasks="${SLURM_JOB_NUM_NODES}" \
+    --ntasks-per-node=1 \
+    conda-unpack
+
+# Only the submitted checkout and the staged environment participate in
+# imports. Do not inherit a different checkout or user-site installation.
+export PYTHONPATH="${REPO_ROOT}"
 export REPO_ROOT
 export PROJECT_ROOT="${REPO_ROOT}"
 export OUTPUT_DIR="${REPO_ROOT}/outputs/JamieTest-${SLURM_JOB_ID}"
@@ -77,20 +116,21 @@ module load rccl-net-plugin
 # Preserve every Slingshot/libfabric setting supplied by rccl-net-plugin. Force
 # OFI so a missing multi-node network plugin fails instead of using sockets.
 export NCCL_NET=OFI
-# Work around the ROCm 7.2 illegal-instruction failure seen in the first 4 KiB
-# collective at 512 ranks without constraining RCCL's topology algorithm.
-export NCCL_PROTO=Simple
+# Do not inherit diagnostic overrides from the submission shell. Let RCCL's
+# internal tuner choose the protocol and algorithm for each collective.
+unset NCCL_PROTO NCCL_ALGO
 export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,ENV,NET,GRAPH,COLL
 export NCCL_DEBUG_FILE="${RANK_LOG_DIR}/rccl-%h-%p.log"
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_DUMP_ON_TIMEOUT=1
-export TORCH_FR_BUFFER_SIZE=2000
+export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 
 echo "repo=${REPO_ROOT}"
 echo "python=$(command -v python)"
 echo "conda_prefix=${CONDA_PREFIX:-<unset>}"
+echo "env_archive=${ENV_ARCHIVE} staged_env=${LOCAL_ENV_ROOT}"
 echo "job=${SLURM_JOB_ID} nodes=${SLURM_JOB_NUM_NODES} tasks=${SLURM_NTASKS}"
 echo "master=${MASTER_ADDR}:${MASTER_PORT} data_module=${DATA_MODULE}"
 echo "rank_logs=${RANK_LOG_DIR}"
@@ -121,6 +161,21 @@ except ValueError:
 print("mattergen", mattergen_file)
 print("torch", torch.__version__, "HIP", torch.version.hip)
 print("adios2", adios2.__version__, adios2.__file__)
+
+torch_release = torch.__version__.split("+", 1)[0]
+hip_release = torch.version.hip or ""
+if torch_release != "2.10.0":
+    raise SystemExit(f"ERROR: expected torch 2.10.0, found {torch.__version__}")
+if not hip_release.startswith("7.1"):
+    raise SystemExit(f"ERROR: expected HIP 7.1.x, found {torch.version.hip!r}")
+if not adios2.__version__.startswith("2.10.2"):
+    raise SystemExit(
+        f"ERROR: expected the adios2 2.10.2 series, found {adios2.__version__}"
+    )
+if not torch.distributed.is_nccl_available():
+    raise SystemExit("ERROR: PyTorch was installed without RCCL/NCCL support")
+if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+    raise SystemExit("ERROR: no ROCm GPU is visible in the batch allocation")
 PY
 
 run_mattergen_rank() {
