@@ -3,7 +3,8 @@
 This sweep trains on progressively larger prefixes of the full OMat
 `trainset`. It does not create or copy dataset files. Every run starts from
 the same seed and stops after 600 optimizer steps or 1,800 training seconds,
-whichever comes first.
+whichever comes first. Only position loss contributes to gradients; cell and
+atomic-number losses remain enabled for diagnostic logging with zero weight.
 
 | Run | Samples | Nodes | GPU ranks |
 |---:|---:|---:|---:|

@@ -247,6 +247,9 @@ run_pos_test_rank() {
         trainer.checkpoint.save_last=false \
         trainer.checkpoint.every_n_epochs=0 \
         trainer.checkpoint.every_n_train_steps=0 \
+        model_module.diffusion_module.loss_fn.weights.pos=1.0 \
+        model_module.diffusion_module.loss_fn.weights.cell=0.0 \
+        model_module.diffusion_module.loss_fn.weights.atomic_numbers=0.0 \
         "native_trainer.max_train_seconds=${POS_TEST_MAX_TRAIN_SECONDS}" \
         native_trainer.debug_ddp=false \
         native_trainer.log_every_n_steps=1 \
