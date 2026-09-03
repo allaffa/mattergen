@@ -237,6 +237,17 @@ def test_build_split_dataloader_uses_streaming_batch_sampler():
     assert len(fixed_loader) == 2
 
 
+def test_build_split_dataloader_returns_none_for_explicitly_disabled_split():
+    datamodule = SimpleNamespace(val_dataset=None)
+
+    loader, sampler = build_split_dataloader(
+        datamodule, "val", distributed=False, shuffle=False
+    )
+
+    assert loader is None
+    assert sampler is None
+
+
 def test_average_sample_multipliers_derive_soft_and_hard_node_limits():
     dataset = _ChemGraphDataset([2, 4, 3, 3])
     dataset.total_node_count = 12

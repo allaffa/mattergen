@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,14 @@ from mattergen.diffusion.training_components import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TRAINING_LIMIT_NONE = 0
+_TRAINING_LIMIT_STEPS = 1
+_TRAINING_LIMIT_TIME = 2
+_TRAINING_LIMIT_NAMES = {
+    _TRAINING_LIMIT_STEPS: "max_steps",
+    _TRAINING_LIMIT_TIME: "max_train_seconds",
+}
 
 def _rank_prefix(rank: int) -> str:
     return f"[rank={rank} host={os.uname().nodename}]"
@@ -147,6 +156,42 @@ def _mean_reduce(value: torch.Tensor, distributed: bool) -> torch.Tensor:
         dist.all_reduce(value, op=dist.ReduceOp.SUM)
         value = value / dist.get_world_size()
     return value
+
+
+def _training_limit_code(
+    *,
+    global_step: int,
+    max_steps: int,
+    elapsed_seconds: float,
+    max_train_seconds: float | None,
+) -> int:
+    """Return the first configured training limit reached at a step boundary."""
+
+    if max_steps >= 0 and global_step >= max_steps:
+        return _TRAINING_LIMIT_STEPS
+    if max_train_seconds is not None and elapsed_seconds >= max_train_seconds:
+        return _TRAINING_LIMIT_TIME
+    return _TRAINING_LIMIT_NONE
+
+
+def _synchronize_training_limit(
+    limit_code: int,
+    *,
+    device: torch.device,
+    distributed: bool,
+    rank: int,
+) -> int:
+    """Broadcast rank zero's stop decision so every rank exits together."""
+
+    if not distributed:
+        return limit_code
+    value = torch.tensor(
+        [limit_code if rank == 0 else _TRAINING_LIMIT_NONE],
+        dtype=torch.int32,
+        device=device,
+    )
+    dist.broadcast(value, src=0)
+    return int(value.item())
 
 
 def _assert_equal_loader_lengths(loader: Any, device: torch.device, distributed: bool) -> None:
@@ -560,6 +605,17 @@ def fit(
     trace_rank("after_val_dataloader", steps=(len(val_loader) if val_loader is not None else 0))
 
     max_epochs = int(trainer_cfg.max_epochs)
+    max_steps = int(trainer_cfg.get("max_steps", -1))
+    max_train_seconds_cfg = native_cfg.get("max_train_seconds")
+    max_train_seconds = (
+        None
+        if max_train_seconds_cfg is None
+        else float(max_train_seconds_cfg)
+    )
+    if max_steps < -1:
+        raise ValueError("trainer.max_steps must be -1 or non-negative")
+    if max_train_seconds is not None and max_train_seconds <= 0:
+        raise ValueError("native_trainer.max_train_seconds must be positive")
     grad_clip = float(trainer_cfg.get("gradient_clip_val", 0.0))
     check_val_every_n_epoch = int(trainer_cfg.get("check_val_every_n_epoch", 1))
     use_amp = bool(native_cfg.get("use_amp", False))
@@ -604,8 +660,29 @@ def fit(
                         ckpt_path, start_epoch, resume_batch_idx, global_step,)
 
     best_k: list[tuple[float, Path]] = []
+    if distributed:
+        dist.barrier()
+    training_started_at = time.monotonic()
+    stop_training = False
+    stop_reason: str | None = None
 
     for epoch in range(start_epoch, max_epochs):
+        initial_limit_code = _training_limit_code(
+            global_step=global_step,
+            max_steps=max_steps,
+            elapsed_seconds=time.monotonic() - training_started_at,
+            max_train_seconds=max_train_seconds,
+        )
+        initial_limit_code = _synchronize_training_limit(
+            initial_limit_code,
+            device=device,
+            distributed=distributed,
+            rank=rank,
+        )
+        if initial_limit_code != _TRAINING_LIMIT_NONE:
+            stop_reason = _TRAINING_LIMIT_NAMES[initial_limit_code]
+            break
+
         if epoch == start_epoch:
             trace_rank("first_epoch_entered", epoch=epoch)
         if train_sampler is not None:
@@ -752,6 +829,7 @@ def fit(
                     dist.barrier()
 
             lr = optimizer.param_groups[0]['lr']
+            elapsed_train_seconds = time.monotonic() - training_started_at
 
             should_log = step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0
             if should_log:
@@ -762,9 +840,13 @@ def fit(
                 reduced_metrics = dict(zip(metric_keys, reduced_metric_values))
                 if _is_rank_zero(rank):
                     logger.info(
-                        "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
+                        "epoch=%s step=%s global_step=%s elapsed_train_seconds=%.3f "
+                        "lr=%1.2e loss_train=%.6f pos_train=%.6f "
+                        "cell_train=%.6f atom_train=%.6f",
                         epoch,
                         step_idx,
+                        global_step,
+                        elapsed_train_seconds,
                         lr,
                         float(reduced_loss.item()),
                         float(reduced_metrics.get("pos", torch.tensor(float("nan"))).item()),
@@ -780,6 +862,23 @@ def fit(
                             {"loss_train_step": float(reduced_loss.item()), "epoch": epoch}
                         )
 
+            limit_code = _training_limit_code(
+                global_step=global_step,
+                max_steps=max_steps,
+                elapsed_seconds=elapsed_train_seconds,
+                max_train_seconds=max_train_seconds,
+            )
+            limit_code = _synchronize_training_limit(
+                limit_code,
+                device=device,
+                distributed=distributed,
+                rank=rank,
+            )
+            if limit_code != _TRAINING_LIMIT_NONE:
+                stop_training = True
+                stop_reason = _TRAINING_LIMIT_NAMES[limit_code]
+                break
+
         avg_train = train_loss_sum / max(train_steps, 1)
         _log_streaming_statistics(
             train_sampler,
@@ -788,14 +887,24 @@ def fit(
             rank=rank,
         )
         val_loss = None
+        val_metrics = {
+            "atomic_numbers": float("nan"),
+            "pos": float("nan"),
+            "cell": float("nan"),
+        }
 
         lr = optimizer.param_groups[0]['lr']
 
-        if val_loader is not None and ((epoch + 1) % check_val_every_n_epoch == 0):
+        should_validate = (
+            val_loader is not None
+            and check_val_every_n_epoch > 0
+            and (epoch + 1) % check_val_every_n_epoch == 0
+        )
+        if should_validate:
             model.eval()
             val_loss_sum = 0.0
             val_steps = 0
-            val_metrics = {'atomic_numbers':0,'pos':0,'cell':0}
+            val_metrics = {"atomic_numbers": 0.0, "pos": 0.0, "cell": 0.0}
             with torch.no_grad():
                 for batch in val_loader:
                     batch = _to_device(batch, device)
@@ -810,12 +919,13 @@ def fit(
         _step_schedulers(scheduler_cfgs, when="epoch", val_loss=val_loss)
 
         if _is_rank_zero(rank):
+            logged_val_loss = float("nan") if val_loss is None else val_loss
             logger.info(
                 "epoch=%s lr=%1.2e loss_train=%.6f loss_val=%.6f pos_val=%.6f cell_val=%.6f  atom_val=%.6f",
                 epoch,
                 lr,
                 avg_train,
-                val_loss,
+                logged_val_loss,
                 val_metrics['pos'],
                 val_metrics['cell'],
                 val_metrics['atomic_numbers'],
@@ -827,7 +937,9 @@ def fit(
                 wandb_run.log(metrics)
 
             every_n_epochs = int(ckpt_cfg["every_n_epochs"])
-            should_checkpoint = (epoch + 1) % every_n_epochs == 0
+            should_checkpoint = (
+                every_n_epochs > 0 and (epoch + 1) % every_n_epochs == 0
+            )
             if val_loss is not None:
                 if str(ckpt_cfg["mode"]) == "min":
                     best_val = min(best_val, val_loss)
@@ -852,6 +964,19 @@ def fit(
 
         if distributed:
             dist.barrier()
+
+        if stop_training:
+            break
+
+    elapsed_train_seconds = time.monotonic() - training_started_at
+    if _is_rank_zero(rank) and stop_reason is not None:
+        logger.info(
+            "training_limit_reached reason=%s global_step=%s "
+            "elapsed_train_seconds=%.3f",
+            stop_reason,
+            global_step,
+            elapsed_train_seconds,
+        )
 
     close_sampler = getattr(train_sampler, "close", None)
     if callable(close_sampler):

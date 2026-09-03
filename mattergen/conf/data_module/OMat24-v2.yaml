@@ -30,6 +30,7 @@ train_dataset:
   _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
   split: trainset
   data_path: ${data_module.root_dir}
+  max_samples: null
   properties: ${data_module.properties}
   transforms: ${data_module.transforms}
   keys: ['pos','cell','atomic_numbers','forces']

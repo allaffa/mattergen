@@ -34,6 +34,7 @@ class HydraGNNAdiosCrystalDataset(Dataset):
         transforms=None,
         properties=None,
         keys=None,
+        max_samples=None,
         **_,
     ):
         # ``comm`` remains accepted for configuration compatibility.  Reads
@@ -55,10 +56,22 @@ class HydraGNNAdiosCrystalDataset(Dataset):
         self.node_count_variable = f"{self.label}/natoms"
         if self.node_count_variable not in self.variables:
             raise KeyError(f"ADIOS variable not found: {self.node_count_variable}")
-        self.n_samples = _parse_adios_shape(
+        source_n_samples = _parse_adios_shape(
             self.variables[self.node_count_variable]["Shape"],
             self.node_count_variable,
         )[0]
+        if max_samples is None:
+            self.n_samples = source_n_samples
+        else:
+            max_samples = int(max_samples)
+            if max_samples <= 0:
+                raise ValueError("max_samples must be positive when provided")
+            if max_samples > source_n_samples:
+                raise ValueError(
+                    f"Requested max_samples={max_samples}, but ADIOS split "
+                    f"{self.label!r} contains only {source_n_samples} samples"
+                )
+            self.n_samples = max_samples
 
         atomic_numbers_variable = f"{self.label}/atomic_numbers"
         if atomic_numbers_variable not in self.variables:
@@ -73,7 +86,36 @@ class HydraGNNAdiosCrystalDataset(Dataset):
                 f"Cannot infer total atoms from {atomic_numbers_variable!r} "
                 f"with shape {atomic_shape}"
             )
-        self.total_node_count = int(non_unit_extents[0])
+        if self.n_samples == source_n_samples:
+            self.total_node_count = int(non_unit_extents[0])
+        else:
+            count_variable = f"{atomic_numbers_variable}/variable_count"
+            offset_variable = f"{atomic_numbers_variable}/variable_offset"
+            missing_metadata = [
+                name
+                for name in (count_variable, offset_variable)
+                if name not in self.variables
+            ]
+            if missing_metadata:
+                raise KeyError(
+                    "Cannot calculate the atom count for a limited ADIOS prefix; "
+                    f"missing variables: {missing_metadata}"
+                )
+            first_offset = int(
+                np.asarray(self.f.read(offset_variable, [0], [1])).reshape(-1)[0]
+            )
+            last_index = self.n_samples - 1
+            last_offset = int(
+                np.asarray(self.f.read(offset_variable, [last_index], [1])).reshape(-1)[0]
+            )
+            last_count = int(
+                np.asarray(self.f.read(count_variable, [last_index], [1])).reshape(-1)[0]
+            )
+            self.total_node_count = last_offset + last_count - first_offset
+            if self.total_node_count <= 0:
+                raise ValueError(
+                    f"Invalid packed atomic-number metadata for {self.label!r} prefix"
+                )
 
         required_keys = {"pos", "cell", "atomic_numbers"}
         if "force_rms" in self.property_names:
@@ -91,6 +133,7 @@ class HydraGNNAdiosCrystalDataset(Dataset):
             "adios_dataset_init_completed",
             label=self.label,
             samples=self.n_samples,
+            source_samples=source_n_samples,
             total_nodes=self.total_node_count,
         )
 

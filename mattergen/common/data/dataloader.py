@@ -100,6 +100,11 @@ def build_split_dataloader(
 ) -> tuple[DataLoader | None, Sampler | None]:
     dataset = getattr(datamodule, _split_attr(split), None)
     if dataset is None:
+        # An explicitly configured null split means that no loader should be
+        # built. Without this distinction CrystDataModule.val_dataloader()
+        # calls back into this function recursively.
+        if hasattr(datamodule, _split_attr(split)):
+            return None, None
         loader_method = getattr(datamodule, f"{split}_dataloader", None)
         if loader_method is None:
             return None, None

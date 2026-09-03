@@ -146,7 +146,6 @@ class BaseDataset(Dataset):
                 > 1), only rank 0 reads from disk and the resulting bundle
                 is broadcast to every rank, mirroring HydraGNN's collective
                 IO policy.
-
         Returns:
             The dataset.
         """
@@ -173,6 +172,7 @@ class BaseDataset(Dataset):
         keys: list[str] | None = None,
         dataset_transforms: list[DatasetTransform] | None = None,
         comm: Any = None,
+        max_samples: int | None = None,
     ) -> T:
         """
         Load a dataset from an adios file
@@ -186,6 +186,8 @@ class BaseDataset(Dataset):
                 > 1), only rank 0 reads from disk and the resulting bundle
                 is broadcast to every rank, mirroring HydraGNN's collective
                 IO policy.
+            max_samples: Optional number of leading structures to expose from
+                the ADIOS split.
 
         Returns:
             The dataset.
@@ -202,6 +204,7 @@ class BaseDataset(Dataset):
             label=split,
             transforms=transforms,
             properties=properties,
+            max_samples=max_samples,
         )
 
     def subset(self, indices: Sequence[int]) -> "BaseDataset":

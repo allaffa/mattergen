@@ -35,7 +35,7 @@ def mattergen_main(cfg: omegaconf.DictConfig):
     print(OmegaConf.to_yaml(cfg, resolve=True))
 
     try:
-        main(config)
+        main(config, seed=config.seed)
     except BaseException as exc:
         trace_rank("training_exception", error=repr(exc), error_type=type(exc).__name__)
         raise

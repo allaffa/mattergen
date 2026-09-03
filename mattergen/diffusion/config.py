@@ -15,6 +15,8 @@ class Config:
 
     checkpoint_path: str | None = None  # Required if train == False
 
+    seed: int | None = None
+
     # if load_original is True then we load original weights in validation mode instead of EMA
     load_original: bool = False
 

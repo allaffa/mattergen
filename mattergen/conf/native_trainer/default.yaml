@@ -12,3 +12,5 @@ amp_dtype: float16
 log_every_n_steps: 1
 debug_ddp: false
 debug_ddp_steps: 2
+# Null means unlimited. The timer starts immediately before the training loop.
+max_train_seconds: null
