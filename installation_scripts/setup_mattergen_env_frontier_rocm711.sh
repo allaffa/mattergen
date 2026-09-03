@@ -191,6 +191,19 @@ python -m pip install \
 # training always imports the user's current checkout after staging.
 python -m pip install --no-deps "${REPO_ROOT}"
 
+# Reassert the known-compatible chemistry stack after every other install.
+# This is intentionally last: an existing environment may contain a newer
+# emmet-core, and dependency resolution alone has previously left that version
+# in place even though the constraints file pins 0.85.1.
+python -m pip uninstall --yes pymatgen-core
+python -m pip install \
+    --force-reinstall \
+    --no-deps \
+    --constraint "${SCRIPT_DIR}/frontier-rocm711-constraints.txt" \
+    emmet-core==0.85.1 \
+    pymatgen==2024.10.29 \
+    monty==2024.7.30
+
 export REPO_ROOT
 export PYTHONPATH="${REPO_ROOT}"
 python - <<'PY'

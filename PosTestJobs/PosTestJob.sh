@@ -158,11 +158,27 @@ expected = {
     "torch-sparse-rocm": "0.6.18.post2",
     "torch-cluster-rocm": "1.6.3.post2",
     "adios2": "2.10.2.100774",
+    "emmet-core": "0.85.1",
+    "pymatgen": "2024.10.29",
+    "monty": "2024.7.30",
 }
 for distribution, version in expected.items():
     actual = metadata.version(distribution)
     if actual != version:
         raise SystemExit(f"ERROR: expected {distribution} {version}, found {actual}")
+
+try:
+    conflicting_pymatgen = metadata.version("pymatgen-core")
+except metadata.PackageNotFoundError:
+    pass
+else:
+    raise SystemExit(
+        f"ERROR: conflicting distribution pymatgen-core=={conflicting_pymatgen} "
+        "is installed"
+    )
+
+from emmet.core.material import PropertyOrigin
+from pymatgen.analysis.graphs import MoleculeGraph, StructureGraph
 
 if sys.version_info[:2] != (3, 12):
     raise SystemExit(f"ERROR: expected Python 3.12, found {sys.version.split()[0]}")
