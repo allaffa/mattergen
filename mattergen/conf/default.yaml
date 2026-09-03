@@ -4,7 +4,7 @@ hydra:
 
 auto_resume: False
 seed: null
-#checkpoint_path: /lustre/orion/lrn070/proj-shared/patxi/jaime/mattergen/outputs/singlerun/2026-07-21/11-46-34/checkpoints/last.ckpt
+checkpoint_path: null
 trainer_backend: native_ddp
 
 defaults:
