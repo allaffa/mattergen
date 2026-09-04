@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Combine rank-zero position-loss logs from the Frontier scaling sweep."""
+"""Combine rank-zero position-loss logs from the Frontier timestep sweep."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-RUN_RE = re.compile(r"run-(\d+)-samples-(\d+)-(\d+)$")
+RUN_RE = re.compile(r"run-(\d+)-samples-(\d+)-t-exp-(\d+)-(\d+)$")
 NUMBER = r"[-+]?(?:nan|inf|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 METRIC_RE = re.compile(
     r"epoch=(\d+)\s+step=(\d+)\s+global_step=(\d+)\s+"
@@ -20,7 +20,7 @@ METRIC_RE = re.compile(
     rf"cell_train=({NUMBER})\s+atom_train=({NUMBER})",
     re.IGNORECASE,
 )
-NODE_COUNTS = (1, 4, 16, 64, 64, 64, 64, 64)
+EXPECTED_T_EXPONENTS = (0, 2, 4, 8)
 
 
 def parse_metric_lines(text: str) -> list[dict[str, int | float]]:
@@ -70,14 +70,17 @@ def _write_plot(path: Path, runs: dict[int, list[dict]]) -> None:
         axis.plot(
             [row["global_step"] for row in rows],
             [row["pos_train"] for row in rows],
-            label=f"{int(rows[0]['sample_count']):,} samples",
+            label=(
+                f"max t=2^-{int(rows[0]['t_exponent'])} "
+                f"({float(rows[0]['max_t']):.6g})"
+            ),
             linewidth=1.4,
         )
     if all(row["pos_train"] > 0 for rows in runs.values() for row in rows):
         axis.set_yscale("log")
     axis.set_xlabel("Optimizer step")
     axis.set_ylabel("Training position loss")
-    axis.set_title("OMat prefix scaling: position loss")
+    axis.set_title("OMat timestep-range sweep: position loss")
     axis.grid(True, alpha=0.25)
     axis.legend()
     figure.tight_layout()
@@ -97,27 +100,38 @@ def main() -> None:
 
     all_rows: list[dict] = []
     runs: dict[int, list[dict]] = defaultdict(list)
-    latest_run_dirs: dict[int, tuple[int, int, Path]] = {}
-    for run_dir in sorted(log_root.glob("run-*-samples-*-*")):
+    latest_run_dirs: dict[int, tuple[int, int, int, Path]] = {}
+    for run_dir in sorted(log_root.glob("run-*-samples-*-t-exp-*-*")):
         match = RUN_RE.fullmatch(run_dir.name)
         if match is None:
             continue
-        run_index, sample_count, job_id = map(int, match.groups())
-        if not 0 <= run_index < len(NODE_COUNTS):
+        run_index, sample_count, t_exponent, job_id = map(int, match.groups())
+        if not 0 <= run_index < len(EXPECTED_T_EXPONENTS):
+            continue
+        if t_exponent != EXPECTED_T_EXPONENTS[run_index]:
             continue
         previous = latest_run_dirs.get(run_index)
         if previous is None or job_id > previous[0]:
-            latest_run_dirs[run_index] = (job_id, sample_count, run_dir)
+            latest_run_dirs[run_index] = (
+                job_id,
+                sample_count,
+                t_exponent,
+                run_dir,
+            )
 
-    for run_index, (job_id, sample_count, run_dir) in sorted(latest_run_dirs.items()):
+    for run_index, (job_id, sample_count, t_exponent, run_dir) in sorted(
+        latest_run_dirs.items()
+    ):
         rank_zero_logs = sorted(run_dir.glob("slurm-rank-0-*.out"))
         for log_path in rank_zero_logs:
             for metric in parse_metric_lines(log_path.read_text(errors="replace")):
                 row = {
                     "run_index": run_index,
                     "sample_count": sample_count,
-                    "nodes": NODE_COUNTS[run_index],
-                    "ranks": NODE_COUNTS[run_index] * 8,
+                    "t_exponent": t_exponent,
+                    "max_t": 2.0 ** -t_exponent,
+                    "nodes": 1,
+                    "ranks": 8,
                     "job_id": job_id,
                     **metric,
                     "log_path": str(log_path),
@@ -127,7 +141,8 @@ def main() -> None:
 
     all_rows.sort(key=lambda row: (row["run_index"], row["job_id"], row["global_step"]))
     metric_fields = [
-        "run_index", "sample_count", "nodes", "ranks", "job_id", "epoch",
+        "run_index", "sample_count", "t_exponent", "max_t", "nodes", "ranks",
+        "job_id", "epoch",
         "epoch_step", "global_step", "elapsed_train_seconds", "lr", "loss_train",
         "pos_train", "cell_train", "atom_train", "log_path",
     ]
@@ -153,6 +168,8 @@ def main() -> None:
             {
                 "run_index": run_index,
                 "sample_count": first["sample_count"],
+                "t_exponent": first["t_exponent"],
+                "max_t": first["max_t"],
                 "nodes": first["nodes"],
                 "ranks": first["ranks"],
                 "job_id": final["job_id"],
@@ -165,7 +182,8 @@ def main() -> None:
             }
         )
     summary_fields = [
-        "run_index", "sample_count", "nodes", "ranks", "job_id", "logged_steps",
+        "run_index", "sample_count", "t_exponent", "max_t", "nodes", "ranks",
+        "job_id", "logged_steps",
         "first_pos_train", "final_pos_train", "minimum_pos_train",
         "final_over_first", "final_elapsed_train_seconds",
     ]

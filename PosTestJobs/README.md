@@ -1,21 +1,19 @@
-# Position-loss scaling sweep
+# Position-loss timestep sweep
 
-This sweep trains on progressively larger prefixes of the full OMat
-`trainset`. It does not create or copy dataset files. Every run starts from
-the same seed and stops after 600 optimizer steps or 1,800 training seconds,
-whichever comes first. Only position loss contributes to gradients; cell and
-atomic-number losses remain enabled for diagnostic logging with zero weight.
+This sweep uses one Frontier node with eight GPU ranks and the same first 1,024
+structures from the full OMat `trainset` in every run. The four runs restrict
+uniformly sampled diffusion timesteps to progressively smaller intervals.
+Every run starts from the same seed and stops after 600 optimizer steps or
+1,800 training seconds, whichever comes first. Only position loss contributes
+to gradients; cell and atomic-number losses remain enabled for diagnostic
+logging with zero weight.
 
-| Run | Samples | Nodes | GPU ranks |
-|---:|---:|---:|---:|
-| 0 | 1,024 | 1 | 8 |
-| 1 | 4,096 | 4 | 32 |
-| 2 | 16,384 | 16 | 128 |
-| 3 | 65,536 | 64 | 512 |
-| 4 | 262,144 | 64 | 512 |
-| 5 | 1,048,576 | 64 | 512 |
-| 6 | 4,194,304 | 64 | 512 |
-| 7 | 16,777,216 | 64 | 512 |
+| Run | Exponent `n` | Timestep range | Samples | Nodes | GPU ranks |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 0 | `[0, 1]` | 1,024 | 1 | 8 |
+| 1 | 2 | `[0, 1/4]` | 1,024 | 1 | 8 |
+| 2 | 4 | `[0, 1/16]` | 1,024 | 1 | 8 |
+| 3 | 8 | `[0, 1/256]` | 1,024 | 1 | 8 |
 
 ## Run on Frontier
 
@@ -45,8 +43,8 @@ job only after the current one succeeds. It stops on the first failure.
 To resume at a particular run after fixing a failure:
 
 ```bash
-nohup bash PosTestJobs/run_sweep.sh --start-at 3 \
-  > PosTestJobs/sweep-launcher-from-3.log 2>&1 < /dev/null &
+nohup bash PosTestJobs/run_sweep.sh --start-at 2 \
+  > PosTestJobs/sweep-launcher-from-2.log 2>&1 < /dev/null &
 ```
 
 The expected environment archive and OMat path are inherited from

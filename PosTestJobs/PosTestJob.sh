@@ -16,6 +16,8 @@ set -euo pipefail
 
 : "${POS_TEST_RUN_INDEX:?POS_TEST_RUN_INDEX must be set by run_sweep.sh}"
 : "${POS_TEST_SAMPLES:?POS_TEST_SAMPLES must be set by run_sweep.sh}"
+: "${POS_TEST_T_EXP:?POS_TEST_T_EXP must be set by run_sweep.sh}"
+: "${POS_TEST_MAX_T:?POS_TEST_MAX_T must be set by run_sweep.sh}"
 
 REPO_ROOT="${MATTERGEN_REPO_ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}"
 SCRIPT_DIR="${REPO_ROOT}/installation_scripts"
@@ -27,7 +29,7 @@ OMAT_DATA_PATH="${OMAT_DATA_PATH:-/lustre/orion/world-shared/lrn070/jyc/frontier
 POS_TEST_SEED="${POS_TEST_SEED:-0}"
 POS_TEST_MAX_STEPS="${POS_TEST_MAX_STEPS:-600}"
 POS_TEST_MAX_TRAIN_SECONDS="${POS_TEST_MAX_TRAIN_SECONDS:-1800}"
-RUN_NAME="run-${POS_TEST_RUN_INDEX}-samples-${POS_TEST_SAMPLES}-${SLURM_JOB_ID}"
+RUN_NAME="run-${POS_TEST_RUN_INDEX}-samples-${POS_TEST_SAMPLES}-t-exp-${POS_TEST_T_EXP}-${SLURM_JOB_ID}"
 RANK_LOG_DIR="${REPO_ROOT}/jobOutputs/PosTest/${RUN_NAME}"
 OUTPUT_DIR="${REPO_ROOT}/outputs/PosTest/${RUN_NAME}"
 
@@ -130,6 +132,7 @@ export TORCH_NCCL_DUMP_ON_TIMEOUT=1
 export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 
 echo "run=${POS_TEST_RUN_INDEX} samples=${POS_TEST_SAMPLES} seed=${POS_TEST_SEED}"
+echo "timestep_range=[0,2^-${POS_TEST_T_EXP}]=[0,${POS_TEST_MAX_T}]"
 echo "job=${SLURM_JOB_ID} nodes=${SLURM_JOB_NUM_NODES} ranks=${SLURM_NTASKS}"
 echo "max_steps=${POS_TEST_MAX_STEPS} max_train_seconds=${POS_TEST_MAX_TRAIN_SECONDS}"
 echo "dataset=${OMAT_DATA_PATH}"
@@ -250,6 +253,7 @@ run_pos_test_rank() {
         model_module.diffusion_module.loss_fn.weights.pos=1.0 \
         model_module.diffusion_module.loss_fn.weights.cell=0.0 \
         model_module.diffusion_module.loss_fn.weights.atomic_numbers=0.0 \
+        "+model_module.diffusion_module.timestep_sampler={_target_:mattergen.diffusion.timestep_samplers.UniformTimestepSampler,min_t:0.0,max_t:${POS_TEST_MAX_T}}" \
         "native_trainer.max_train_seconds=${POS_TEST_MAX_TRAIN_SECONDS}" \
         native_trainer.debug_ddp=false \
         native_trainer.log_every_n_steps=1 \
@@ -270,7 +274,7 @@ run_pos_test_rank() {
 }
 export -f run_pos_test_rank
 export RANK_LOG_DIR POS_TEST_SEED POS_TEST_SAMPLES POS_TEST_MAX_STEPS
-export POS_TEST_MAX_TRAIN_SECONDS OMAT_DATA_PATH
+export POS_TEST_MAX_TRAIN_SECONDS POS_TEST_T_EXP POS_TEST_MAX_T OMAT_DATA_PATH
 
 set +e
 srun \
