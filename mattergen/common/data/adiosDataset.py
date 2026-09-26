@@ -167,9 +167,11 @@ class HydraGNNAdiosCrystalDataset(Dataset):
             force_rms = torch.sqrt(torch.sum(forces.square(), dim=-1).mean())
             props["force_rms"] = force_rms.clamp_min(1e-8).reshape(1)
 
+        frac_pos = torch.linalg.solve(cell.T, pos.T).T
+
         data = ChemGraph(
-            pos=pos % 1.0,
-            cell=cell.unsqueeze(0),
+            pos=frac_pos % 1.0,
+            cell=cell.T.unsqueeze(0),
             atomic_numbers=atomic_numbers,
             num_atoms=natoms,
             num_nodes=natoms,

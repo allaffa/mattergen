@@ -10,7 +10,6 @@ properties:
   # - hhi_score
   # - space_group
   # - energy_above_hull
-  # - force_rms
 
 dataset_transforms: 
   - _target_: mattergen.common.data.dataset_transform.filter_sparse_properties
@@ -22,9 +21,9 @@ transforms:
 - _target_: mattergen.common.data.transform.set_chemical_system_string
   _partial_: true
 
-average_density: 0.0500000 # atoms/Angstrom**3
-root_dir: /lustre/orion/world-shared/lrn070/jyc/frontier/dataset_sc26_restripe/OMat24-v2.bp # this is big omat
-#root_dir: /lustre/orion/lrn070/proj-shared/patxi/adios/data/miniOMat24-forces/miniOMat24-forces-85k.bp # this is the small one
+average_density: 0.05 # atoms/Angstrom**3
+root_dir: /lustre/orion/world-shared/lrn070/jyc/frontier/dataset_sc26_restripe/OMat24-v2.bp
+#root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/miniOMat24-forces-3M.bp
 
 train_dataset:
   _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
@@ -32,7 +31,6 @@ train_dataset:
   data_path: ${data_module.root_dir}
   properties: ${data_module.properties}
   transforms: ${data_module.transforms}
-  keys: ['pos','cell','atomic_numbers','forces']
   dataset_transforms: ${data_module.dataset_transforms}
 
 val_dataset:
@@ -41,36 +39,17 @@ val_dataset:
   data_path: ${data_module.root_dir}
   properties: ${data_module.properties}
   transforms: ${data_module.transforms}
-  keys: ['pos','cell','atomic_numbers','forces']
   dataset_transforms: ${data_module.dataset_transforms}
 
 num_workers:
-  train: 0
-  val: 0
+  train: 8
+  val: 8
 
 batch_size:
   # total batch size of 512, adjust for number of devices, nodes, and gradient accumulation
   # train:  ${eval:'((512//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
   # val: ${eval:'((128//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
-  train:  ${eval:'(512//8)'}
-  val: ${eval:'(512//8)'}
+  train:  ${eval:'(512//16)'}
+  val: ${eval:'(512//16)'}
 
-batching:
-  mode: streaming_node_budget
-  # Soft target = 64 * average atoms/sample (derived from ADIOS metadata).
-  target_nodes: null
-  target_average_samples: 64
-  # Hard limit = 70 * average atoms/sample.
-  max_nodes: null
-  max_average_samples: 70
-  steps_per_epoch: null
-  max_graphs: null
-  metadata_chunk_size: 32
-  metadata_cache_size: null
-  metadata_source: auto
-  forward_window: 1
-  shuffle: true
-  seed: 0
-  oversized_sample: error
-
-max_epochs: 10000
+max_epochs: 50000

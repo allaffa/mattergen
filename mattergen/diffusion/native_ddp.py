@@ -252,18 +252,40 @@ def _step_schedulers(
     scheduler_cfgs: list[dict[str, Any]],
     when: str,
     val_loss: float | None = None,
+    event_count: int | None = None,
+    metrics: dict[str, float | None] | None = None,
 ):
+    interval_aliases = {
+        "step": "step",
+        "steps": "step",
+        "epoch": "epoch",
+        "epochs": "epoch",
+    }
+    normalized_when = interval_aliases.get(when, when)
     for scheduler_cfg in scheduler_cfgs:
         scheduler = scheduler_cfg["scheduler"]
         interval = scheduler_cfg.get("interval", "epoch")
-        if interval != when:
+        normalized_interval = interval_aliases.get(str(interval), str(interval))
+        if normalized_interval != normalized_when:
+            continue
+
+        frequency = int(scheduler_cfg.get("frequency", 1))
+        if frequency <= 0:
+            raise ValueError("Scheduler frequency must be positive.")
+        if event_count is not None and event_count % frequency != 0:
             continue
 
         monitor_key = scheduler_cfg.get("monitor")
         if monitor_key is not None:
-            if val_loss is None:
+            monitor_value = None
+            if metrics is not None:
+                monitor_value = metrics.get(str(monitor_key))
+            elif str(monitor_key) == "loss_val":
+                monitor_value = val_loss
+
+            if monitor_value is None:
                 continue
-            scheduler.step(val_loss)
+            scheduler.step(monitor_value)
         else:
             scheduler.step()
 
@@ -706,7 +728,11 @@ def fit(
                     break
 
 
-            _step_schedulers(scheduler_cfgs, when="step")
+            _step_schedulers(
+                scheduler_cfgs,
+                when="step",
+                event_count=global_step + 1,
+            )
             reduced_loss = _mean_reduce(loss.detach(), distributed)
             if debug_ddp and step_idx < debug_steps:
                 logger.info(
@@ -807,7 +833,13 @@ def fit(
             val_loss = val_loss_sum / max(val_steps, 1)
             val_metrics = {key:val/max(val_steps,1) for key,val in val_metrics.items()}
 
-        _step_schedulers(scheduler_cfgs, when="epoch", val_loss=val_loss)
+        _step_schedulers(
+            scheduler_cfgs,
+            when="epoch",
+            val_loss=val_loss,
+            event_count=epoch + 1,
+            metrics={"loss_train": avg_train, "loss_val": val_loss},
+        )
 
         if _is_rank_zero(rank):
             logger.info(

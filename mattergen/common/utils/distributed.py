@@ -302,6 +302,7 @@ def setup_ddp(
         return get_world_size(), get_rank()
 
     world_size, world_rank = init_comm_size_and_rank()
+    local_rank = get_local_rank()
     trace_rank("ddp_rank_discovered", rank=world_rank, world_size=world_size)
 
     if world_size <= 1:
@@ -310,6 +311,26 @@ def setup_ddp(
         return 1, 0
 
     chosen_backend = _select_backend(backend)
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        if device_count > 0:
+            cuda_index = local_rank % device_count
+            torch.cuda.set_device(cuda_index)
+            trace_rank(
+                "before_init_set_cuda_device",
+                local_rank=local_rank,
+                cuda_index=cuda_index,
+            )
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device_count = torch.xpu.device_count()
+        if device_count > 0:
+            xpu_index = local_rank % device_count
+            torch.xpu.set_device(xpu_index)
+            trace_rank(
+                "before_init_set_xpu_device",
+                local_rank=local_rank,
+                xpu_index=xpu_index,
+            )
     master_addr = _derive_master_addr()
     base_port = _derive_master_port()
     explicit_port = os.getenv(_MASTER_PORT_ENV) is not None or os.getenv("MASTER_PORT") is not None
@@ -322,7 +343,7 @@ def setup_ddp(
         os.environ["MASTER_PORT"] = str(port)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["RANK"] = str(world_rank)
-        os.environ.setdefault("LOCAL_RANK", str(get_local_rank()))
+        os.environ.setdefault("LOCAL_RANK", str(local_rank))
 
         if world_rank == 0:
             logger.info(
