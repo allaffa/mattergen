@@ -3,10 +3,10 @@
 #SBATCH -J mattergen-train
 #SBATCH -o jobOutputs/mattergen-train-%j.out
 #SBATCH -e jobOutputs/mattergen-train-%j.out
-#SBATCH -t 00:45:00
+#SBATCH -t 00:30:00
 #SBATCH -p batch
 ##SBATCH -q debug
-#SBATCH -N 64
+#SBATCH -N 32
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-task=1
 #SBATCH --gpu-bind=closest
@@ -15,6 +15,12 @@
 
 set -euo pipefail
 
+echo "SLURM_JOB_ID=${SLURM_JOB_ID}"
+echo "SLURM_JOB_NUM_NODES=${SLURM_JOB_NUM_NODES}"
+echo "SLURM_NTASKS=${SLURM_NTASKS}"
+echo "SLURM_NTASKS_PER_NODE=${SLURM_NTASKS_PER_NODE:-<unset>}"
+echo "SLURM_CPUS_ON_NODE=${SLURM_CPUS_ON_NODE:-<unset>}"
+
 # ---------------------------------------------------------------------------
 # MatterGen training on Frontier with ROCm 7.1.1
 # ---------------------------------------------------------------------------
@@ -22,8 +28,10 @@ set -euo pipefail
 # was getting some annoying matplotlib errors 
 #
 export MPLBACKEND=Agg
-export MPLCONFIGDIR=/tmp/$USER/mpl-cache
-mkdir -p "$MPLCONFIGDIR"
+export MPLCONFIGDIR="/tmp/${USER}/mpl-${SLURM_JOB_ID}"
+export XDG_CACHE_HOME="/tmp/${USER}/xdg-${SLURM_JOB_ID}"
+mkdir -p "${MPLCONFIGDIR}" "${XDG_CACHE_HOME}"
+
 
 
 # REPO_ROOT must be the directory that CONTAINS the top-level "mattergen/"
@@ -74,6 +82,7 @@ if ! sbcast -pf "${ENV_ARCHIVE}" "${LOCAL_ENV_ARCHIVE}"; then
 fi
 
 # Create and unpack local env on each node
+echo "Starting mkdir on node-local NVMe"
 srun \
     --nodes="${SLURM_JOB_NUM_NODES}" \
     --ntasks="${SLURM_JOB_NUM_NODES}" \
@@ -81,6 +90,7 @@ srun \
     --gpu-bind=none \
     mkdir -p "${LOCAL_ENV_ROOT}"
 
+echo "Starting tar unpack"
 srun \
     --nodes="${SLURM_JOB_NUM_NODES}" \
     --ntasks="${SLURM_JOB_NUM_NODES}" \
@@ -89,15 +99,41 @@ srun \
     --gpu-bind=none \
     tar --use-compress-program=pigz -xf "${LOCAL_ENV_ARCHIVE}" -C "${LOCAL_ENV_ROOT}"
 
+echo "Activating env"
 conda activate "${LOCAL_ENV_ROOT}"
 
+echo "Starting conda-unpack"
+srun \
+    --nodes="${SLURM_JOB_NUM_NODES}" \
+    --ntasks="${SLURM_JOB_NUM_NODES}" \
+    --ntasks-per-node=1 \
+    --cpus-per-task=1 \
+    --gpu-bind=none \
+    bash -c '
+        export MPLBACKEND=Agg
+        export MPLCONFIGDIR="/tmp/'"${USER}"'/mpl-'"${SLURM_JOB_ID}"'"
+        export XDG_CACHE_HOME="/tmp/'"${USER}"'/xdg-'"${SLURM_JOB_ID}"'"
+        mkdir -p "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
+        conda-unpack
+    '
+
+
+# Build one node-local Matplotlib font cache before all eight training ranks
+# start importing concurrently on each node.
 srun \
     --nodes="${SLURM_JOB_NUM_NODES}" \
     --ntasks="${SLURM_JOB_NUM_NODES}" \
     --ntasks-per-node=1 \
     --gpu-bind=none \
-    conda-unpack
+    bash -c '
+        export MPLBACKEND=Agg
+        export MPLCONFIGDIR="/tmp/'"${USER}"'/mpl-'"${SLURM_JOB_ID}"'"
+        export XDG_CACHE_HOME="/tmp/'"${USER}"'/xdg-'"${SLURM_JOB_ID}"'"
+        mkdir -p "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
+        python -c "from matplotlib import font_manager; font_manager._load_fontmanager()"
+    '
 
+echo "Finished conda-unpack"
 which python
 
 # ---------------------------------------------------------------------------
@@ -147,21 +183,7 @@ for entry in "${ld_library_entries[@]}"; do
 done
 export LD_LIBRARY_PATH="${filtered_ld_library_path}"
 
-# ROCm 7.1.1 settings from your working test script:
-# use RCCL socket transport instead of rccl-net-plugin/OFI
-module unload rccl-net-plugin 2>/dev/null || true
-unset NCCL_NET_PLUGIN
-export NCCL_NET=Socket
-export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
-unset NCCL_PROTO NCCL_ALGO
-#export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=INIT,ENV,NET,GRAPH,COLL
-# export NCCL_DEBUG_FILE="${REPO_ROOT}/jobOutputs/rccl-%h-%p.log"
-
-export TORCH_DISTRIBUTED_DEBUG=DETAIL
-export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export TORCH_NCCL_DUMP_ON_TIMEOUT=1
-export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
+module load rccl-net-plugin
 
 echo "Job ${SLURM_JOB_ID}: ${SLURM_JOB_NUM_NODES} nodes, ${SLURM_NTASKS} GPU ranks, data_module=${DATA_MODULE}"
 echo "CHECKPOINT_PATH=${CHECKPOINT_PATH:-<none>}"
@@ -189,8 +211,10 @@ srun \
         export PYTHONPATH="'"${PYTHONPATH}"'"
         export PROJECT_ROOT="'"${PROJECT_ROOT}"'"
         export REPO_ROOT="'"${REPO_ROOT}"'"
-        export MPLCONFIGDIR="/tmp/matplotlib-'"${SLURM_JOB_ID}"'"
-        mkdir -p "${MPLCONFIGDIR}"
+        export MPLBACKEND=Agg
+        export MPLCONFIGDIR="/tmp/'"${USER}"'/mpl-'"${SLURM_JOB_ID}"'"
+        export XDG_CACHE_HOME="/tmp/'"${USER}"'/xdg-'"${SLURM_JOB_ID}"'"
+        mkdir -p "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
 
         python - <<'"'"'PY'"'"'
 import os, sys

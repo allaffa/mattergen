@@ -4,13 +4,45 @@ optimizer_partial:
   _target_: torch.optim.Adam
   _partial_: true
 scheduler_partials:
+  # - scheduler:
+  #     _target_: mattergen.diffusion.training_components.get_warmup_piecewise_constant_lr_scheduler
+  #     warmup_iters: 1000
+  #     start_factor: 0.01
+  #     end_factor: 1.0
+  #     step_boundaries: [1000, 2500, 5000, 10000]
+  #     factors: [1.0, 0.5, 0.1, 0.05, 0.01]
+  #     _partial_: true
+  #   interval: step
+  #   frequency: 1
+  # Linear warmup: the optimizer starts at 1% of its configured learning rate
+  # and reaches the full learning rate after 100,000 optimizer steps.
   - scheduler:
-      _target_: mattergen.diffusion.training_components.get_warmup_piecewise_constant_lr_scheduler
-      warmup_iters: 1000
+      _target_: torch.optim.lr_scheduler.LinearLR
       start_factor: 0.01
       end_factor: 1.0
-      step_boundaries: [1000, 2500, 5000, 10000]
-      factors: [1.0, 0.5, 0.1, 0.05, 0.01]
+      total_iters: 2000
       _partial_: true
     interval: step
     frequency: 1
+    start_step: 1
+    end_step: 2000
+  # After warmup, evaluate the globally averaged DDP training loss every 50
+  # optimizer steps and reduce the learning rate when it plateaus.
+  - scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: min
+      factor: 0.75
+      patience: 1000
+      threshold: 0.0001
+      threshold_mode: rel
+      cooldown: 0
+      min_lr: 1.0e-6
+      eps: 1.0e-8
+      _partial_: true
+    # interval accepts step/steps or epoch/epochs. ReduceLROnPlateau.patience
+    # counts scheduler evaluations, not raw optimizer steps.
+    interval: step
+    frequency: 50
+    start_step: 2001
+    monitor: loss_train_step
+

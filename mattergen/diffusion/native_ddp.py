@@ -272,8 +272,29 @@ def _step_schedulers(
         frequency = int(scheduler_cfg.get("frequency", 1))
         if frequency <= 0:
             raise ValueError("Scheduler frequency must be positive.")
-        if event_count is not None and event_count % frequency != 0:
-            continue
+
+        # Optional activation windows let multiple schedulers run in sequence,
+        # e.g. a step-based LinearLR warmup followed by ReduceLROnPlateau.
+        # Bounds are inclusive and use the same one-based counter as
+        # ``event_count`` (optimizer steps for a step scheduler).
+        start_key = f"start_{normalized_interval}"
+        end_key = f"end_{normalized_interval}"
+        start_event = int(scheduler_cfg.get(start_key, 1))
+        end_event_value = scheduler_cfg.get(end_key)
+        end_event = int(end_event_value) if end_event_value is not None else None
+        if start_event <= 0:
+            raise ValueError(f"Scheduler {start_key} must be positive.")
+        if end_event is not None and end_event < start_event:
+            raise ValueError(f"Scheduler {end_key} must be >= {start_key}.")
+
+        if event_count is not None:
+            if event_count < start_event:
+                continue
+            if end_event is not None and event_count > end_event:
+                continue
+            active_event_count = event_count - start_event + 1
+            if active_event_count % frequency != 0:
+                continue
 
         monitor_key = scheduler_cfg.get("monitor")
         if monitor_key is not None:
@@ -728,12 +749,17 @@ def fit(
                     break
 
 
+            reduced_loss = _mean_reduce(loss.detach(), distributed)
+            reduced_loss_value = float(reduced_loss.item())
             _step_schedulers(
                 scheduler_cfgs,
                 when="step",
                 event_count=global_step + 1,
+                metrics={
+                    "loss_train": reduced_loss_value,
+                    "loss_train_step": reduced_loss_value,
+                },
             )
-            reduced_loss = _mean_reduce(loss.detach(), distributed)
             if debug_ddp and step_idx < debug_steps:
                 logger.info(
                     "%s epoch=%s step=%s local_loss=%.6f reduced_loss=%.6f",
@@ -741,10 +767,10 @@ def fit(
                     epoch,
                     step_idx,
                     float(loss.detach().item()),
-                    float(reduced_loss.item()),
+                    reduced_loss_value,
                 )
 
-            train_loss_sum += float(reduced_loss.item())
+            train_loss_sum += reduced_loss_value
             train_steps += 1
 
             # Increment global step and save if required
@@ -792,7 +818,7 @@ def fit(
                         epoch,
                         step_idx,
                         lr,
-                        float(reduced_loss.item()),
+                        reduced_loss_value,
                         float(reduced_metrics.get("pos", torch.tensor(float("nan"))).item()),
                         float(reduced_metrics.get("cell", torch.tensor(float("nan"))).item()),
                         float(
@@ -803,7 +829,7 @@ def fit(
                     )
                     if wandb_run is not None:
                         wandb_run.log(
-                            {"loss_train_step": float(reduced_loss.item()), "epoch": epoch}
+                            {"loss_train_step": reduced_loss_value, "epoch": epoch}
                         )
 
         avg_train = train_loss_sum / max(train_steps, 1)
