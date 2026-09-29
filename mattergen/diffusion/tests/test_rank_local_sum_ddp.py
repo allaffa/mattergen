@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
@@ -11,6 +13,10 @@ from mattergen.diffusion.corruption.multi_corruption import MultiCorruption
 from mattergen.diffusion.corruption.sde_lib import VESDE
 from mattergen.diffusion.data.batched_data import SimpleBatchedData
 from mattergen.diffusion.losses import SummedFieldLoss
+from mattergen.diffusion.native_ddp import (
+    _NonFiniteGradientHookState,
+    _nonfinite_logging_allreduce_hook,
+)
 
 
 def _prediction_square_loss(*, score_model_output, **_):
@@ -27,6 +33,17 @@ def _rank_local_sum_worker(rank: int, init_file: str) -> None:
     )
     try:
         model = DistributedDataParallel(torch.nn.Linear(1, 1, bias=False))
+        hook_state = _NonFiniteGradientHookState(rank)
+        hook_state.set_batch(
+            SimpleNamespace(
+                sample_id=torch.tensor([rank]),
+                structure_id=[f"sample-{rank}"],
+            ),
+            epoch=0,
+            step=0,
+            global_step=0,
+        )
+        model.register_comm_hook(hook_state, _nonfinite_logging_allreduce_hook)
         with torch.no_grad():
             model.module.weight.fill_(1.0)
 
@@ -71,3 +88,56 @@ def test_ddp_averages_unequal_rank_local_sums(tmp_path):
         nprocs=2,
         join=True,
     )
+
+
+def test_nonfinite_hook_state_tracks_batch_samples():
+    state = _NonFiniteGradientHookState(rank=17)
+    state.set_batch(
+        SimpleNamespace(
+            sample_id=torch.tensor([7, 11]),
+            structure_id=["structure-7", "structure-11"],
+        ),
+        epoch=2,
+        step=5,
+        global_step=105,
+    )
+
+    assert state.rank == 17
+    assert state.sample_ids == [7, 11]
+    assert state.structure_ids == ["structure-7", "structure-11"]
+    assert state.epoch == 2
+    assert state.step == 5
+    assert state.global_step == 105
+
+
+def test_nonfinite_hook_logs_rank_and_samples_once(monkeypatch, caplog):
+    state = _NonFiniteGradientHookState(rank=17)
+    state.set_batch(
+        SimpleNamespace(
+            sample_id=torch.tensor([7, 11]),
+            structure_id=["structure-7", "structure-11"],
+        ),
+        epoch=2,
+        step=5,
+        global_step=105,
+    )
+    bucket = SimpleNamespace(
+        buffer=lambda: torch.tensor([float("nan")]),
+        index=lambda: 3,
+    )
+    expected = object()
+    monkeypatch.setattr(
+        "mattergen.diffusion.native_ddp.default_hooks.allreduce_hook",
+        lambda process_group, grad_bucket: expected,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        assert _nonfinite_logging_allreduce_hook(state, bucket) is expected
+        assert _nonfinite_logging_allreduce_hook(state, bucket) is expected
+
+    messages = [record.message for record in caplog.records]
+    assert len(messages) == 1
+    assert "rank=17" in messages[0]
+    assert "epoch=2 step=5 global_step=105 bucket=3" in messages[0]
+    assert "sample_ids=[7, 11]" in messages[0]
+    assert "structure_ids=['structure-7', 'structure-11']" in messages[0]

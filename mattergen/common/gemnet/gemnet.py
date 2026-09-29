@@ -556,7 +556,8 @@ class GemNetT(torch.nn.Module):
         )
 
         edge_index = out["edge_index"]
-        D_st = out["distances"]
+        distances = out["distances"]
+        D_st = distances.clamp_min(torch.finfo(distances.dtype).eps)
         # These vectors actually point in the opposite direction.
         # But we want to use col as idx_t for efficient aggregation.
         V_st = -out["distance_vec"] / D_st[:, None]
