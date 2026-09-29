@@ -175,6 +175,7 @@ class HydraGNNAdiosCrystalDataset(Dataset):
             atomic_numbers=atomic_numbers,
             num_atoms=natoms,
             num_nodes=natoms,
+            sample_id=torch.tensor([idx], dtype=torch.long),
             **props,
         )
         if self.transforms is not None:

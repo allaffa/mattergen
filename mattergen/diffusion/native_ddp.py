@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
 from omegaconf import DictConfig
 import yaml
 
@@ -29,6 +30,57 @@ logger = logging.getLogger(__name__)
 
 def _rank_prefix(rank: int) -> str:
     return f"[rank={rank} host={os.uname().nodename}]"
+
+
+class _NonFiniteGradientHookState:
+    def __init__(self, rank: int):
+        self.rank = rank
+        self.process_group = dist.group.WORLD
+        self.epoch = -1
+        self.step = -1
+        self.global_step = -1
+        self.sample_ids: list[int] = []
+        self.structure_ids: list[str] = []
+        self.logged = False
+
+    def set_batch(self, batch: Any, *, epoch: int, step: int, global_step: int) -> None:
+        self.epoch = epoch
+        self.step = step
+        self.global_step = global_step
+        sample_ids = getattr(batch, "sample_id", None)
+        self.sample_ids = (
+            sample_ids.detach().cpu().reshape(-1).tolist()
+            if isinstance(sample_ids, torch.Tensor)
+            else []
+        )
+        structure_ids = getattr(batch, "structure_id", None)
+        self.structure_ids = [str(value) for value in structure_ids] if structure_ids else []
+        self.logged = False
+
+
+def _nonfinite_logging_allreduce_hook(
+    state: _NonFiniteGradientHookState,
+    bucket: dist.GradBucket,
+) -> torch.futures.Future[torch.Tensor]:
+    if not state.logged and not torch.isfinite(bucket.buffer()).all().item():
+        logger.error(
+            "%s non-finite local gradient before all-reduce epoch=%s step=%s "
+            "global_step=%s bucket=%s sample_ids=%s structure_ids=%s",
+            _rank_prefix(state.rank),
+            state.epoch,
+            state.step,
+            state.global_step,
+            bucket.index(),
+            state.sample_ids,
+            state.structure_ids,
+        )
+        state.logged = True
+    return default_hooks.allreduce_hook(state.process_group, bucket)
+
+
+_nonfinite_logging_allreduce_hook.__annotations__["bucket"] = dist.GradBucket
+_nonfinite_logging_allreduce_hook.__annotations__["return"] = torch.futures.Future[torch.Tensor]
+
 
 def _selected_rank(rank: int, world_size: int) -> bool:
     # Keep logging volume under control.
@@ -556,6 +608,11 @@ def fit(
     )
     trace_rank("after_ddp_wrap")
 
+    nonfinite_hook_state = None
+    if distributed and bool(native_cfg.get("log_nonfinite_local_gradients", True)):
+        nonfinite_hook_state = _NonFiniteGradientHookState(rank)
+        model.register_comm_hook(nonfinite_hook_state, _nonfinite_logging_allreduce_hook)
+
     if distributed:
         trace_rank("before_post_ddp_barrier")
         dist.barrier()
@@ -664,6 +721,13 @@ def fit(
 
             if step_idx == 0:
                 trace_rank("first_train_batch_loaded")
+            if nonfinite_hook_state is not None:
+                nonfinite_hook_state.set_batch(
+                    batch,
+                    epoch=epoch,
+                    step=step_idx,
+                    global_step=global_step,
+                )
             batch = _to_device(batch, device)
             if step_idx == 0:
                 trace_rank("first_train_batch_on_device")
