@@ -286,6 +286,8 @@ class CrystalDataset(BaseDataset):
             ),
             num_atoms=num_atoms,
             num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
+            sample_id=torch.tensor([index], dtype=torch.long),
+            structure_id=str(self.structure_id[index]),
             # mypy does not like string literals as kwargs, see https://github.com/python/mypy/pull/10237
             **props_dict,  # type: ignore
         )
