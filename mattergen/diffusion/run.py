@@ -16,6 +16,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from mattergen.common.utils.config_utils import get_config
+from mattergen.common.utils.rank_debug import trace_rank
 from mattergen.diffusion.config import Config, resolve_model_module_cfg
 from mattergen.diffusion.exceptions import AmbiguousConfig
 from mattergen.diffusion.model_module import DiffusionModelModule
@@ -96,15 +97,24 @@ def main(
     else:
         raise NotImplementedError
 
+    trace_rank("before_datamodule_instantiation")
     datamodule = maybe_instantiate(config.data_module)
+    trace_rank(
+        "after_datamodule_instantiation",
+        train_samples=len(datamodule.train_dataset),
+        val_samples=(len(datamodule.val_dataset) if datamodule.val_dataset is not None else 0),
+    )
 
     ckpt_path = config.checkpoint_path
     if config.auto_resume:
         ckpt_path = _find_latest_checkpoint(str(Path(os.getcwd()) / "checkpoints"))
 
     model_module_cfg = resolve_model_module_cfg(config)
+    trace_rank("before_model_instantiation")
     model_module: DiffusionModelModule = instantiate(model_module_cfg)
+    trace_rank("after_model_instantiation")
 
+    trace_rank("before_native_fit")
     native_fit(
         model_module=model_module,
         datamodule=datamodule,
@@ -113,6 +123,7 @@ def main(
         config_dict=config_as_dict,
         ckpt_path=ckpt_path,
     )
+    trace_rank("after_native_fit")
 
     return None, model_module.diffusion_module
 

@@ -8,12 +8,14 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
 from omegaconf import DictConfig
 import yaml
 
 from mattergen.common.data.dataloader import build_split_dataloader
 from mattergen.common.data.property_scalers import compute_property_scalers
 from mattergen.common.utils import distributed as ddp_utils
+from mattergen.common.utils.rank_debug import trace_rank
 from mattergen.diffusion.data.batched_data import BatchedData
 from mattergen.diffusion.diffusion_module import DiffusionModule
 from mattergen.diffusion.model_module import DiffusionModelModule
@@ -28,6 +30,57 @@ logger = logging.getLogger(__name__)
 
 def _rank_prefix(rank: int) -> str:
     return f"[rank={rank} host={os.uname().nodename}]"
+
+
+class _NonFiniteGradientHookState:
+    def __init__(self, rank: int):
+        self.rank = rank
+        self.process_group = dist.group.WORLD
+        self.epoch = -1
+        self.step = -1
+        self.global_step = -1
+        self.sample_ids: list[int] = []
+        self.structure_ids: list[str] = []
+        self.logged = False
+
+    def set_batch(self, batch: Any, *, epoch: int, step: int, global_step: int) -> None:
+        self.epoch = epoch
+        self.step = step
+        self.global_step = global_step
+        sample_ids = getattr(batch, "sample_id", None)
+        self.sample_ids = (
+            sample_ids.detach().cpu().reshape(-1).tolist()
+            if isinstance(sample_ids, torch.Tensor)
+            else []
+        )
+        structure_ids = getattr(batch, "structure_id", None)
+        self.structure_ids = [str(value) for value in structure_ids] if structure_ids else []
+        self.logged = False
+
+
+def _nonfinite_logging_allreduce_hook(
+    state: _NonFiniteGradientHookState,
+    bucket: dist.GradBucket,
+) -> torch.futures.Future[torch.Tensor]:
+    if not state.logged and not torch.isfinite(bucket.buffer()).all().item():
+        logger.error(
+            "%s non-finite local gradient before all-reduce epoch=%s step=%s "
+            "global_step=%s bucket=%s sample_ids=%s structure_ids=%s",
+            _rank_prefix(state.rank),
+            state.epoch,
+            state.step,
+            state.global_step,
+            bucket.index(),
+            state.sample_ids,
+            state.structure_ids,
+        )
+        state.logged = True
+    return default_hooks.allreduce_hook(state.process_group, bucket)
+
+
+_nonfinite_logging_allreduce_hook.__annotations__["bucket"] = dist.GradBucket
+_nonfinite_logging_allreduce_hook.__annotations__["return"] = torch.futures.Future[torch.Tensor]
+
 
 def _selected_rank(rank: int, world_size: int) -> bool:
     # Keep logging volume under control.
@@ -91,6 +144,45 @@ def _ddp_collective_sanity(device: torch.device, rank: int, world_size: int) -> 
     )
 
 
+def _ddp_all_gather_preflight(
+    device: torch.device,
+    rank: int,
+    world_size: int,
+) -> None:
+    """Exercise the small all-gather used by DDP before wrapping the model."""
+
+    local_rank = torch.tensor([rank], dtype=torch.int64, device=device)
+    gathered_ranks = torch.empty(world_size, dtype=torch.int64, device=device)
+    trace_rank(
+        "before_pre_ddp_all_gather",
+        input_bytes=local_rank.numel() * local_rank.element_size(),
+        gathered_bytes=gathered_ranks.numel() * gathered_ranks.element_size(),
+        world_size=world_size,
+    )
+    dist.all_gather_into_tensor(gathered_ranks, local_rank)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+    expected = torch.arange(world_size, dtype=torch.int64, device=device)
+    if not torch.equal(gathered_ranks, expected):
+        raise RuntimeError(
+            "pre-DDP all_gather returned unexpected ranks: "
+            f"{gathered_ranks.cpu().tolist()}"
+        )
+    trace_rank(
+        "after_pre_ddp_all_gather",
+        gathered_bytes=gathered_ranks.numel() * gathered_ranks.element_size(),
+        world_size=world_size,
+    )
+    if _selected_rank(rank, world_size):
+        logger.info(
+            "%s pre-DDP all_gather validated %d ranks (%d bytes)",
+            _rank_prefix(rank),
+            world_size,
+            gathered_ranks.numel() * gathered_ranks.element_size(),
+        )
+
+
 def _is_rank_zero(rank: int) -> bool:
     return rank == 0
 
@@ -107,6 +199,90 @@ def _mean_reduce(value: torch.Tensor, distributed: bool) -> torch.Tensor:
         dist.all_reduce(value, op=dist.ReduceOp.SUM)
         value = value / dist.get_world_size()
     return value
+
+
+def _assert_equal_loader_lengths(loader: Any, device: torch.device, distributed: bool) -> None:
+    """Fail before training if a fixed-step sampler disagrees across ranks."""
+
+    sampler = getattr(loader, "batch_sampler", None)
+    if not getattr(sampler, "is_streaming_node_budget", False) or not distributed:
+        return
+    local_length = torch.tensor([len(loader)], dtype=torch.int64, device=device)
+    minimum = local_length.clone()
+    maximum = local_length.clone()
+    dist.all_reduce(minimum, op=dist.ReduceOp.MIN)
+    dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+    if int(minimum.item()) != int(maximum.item()):
+        raise RuntimeError(
+            "streaming_node_budget requires identical steps_per_epoch on all ranks; "
+            f"observed range [{int(minimum.item())}, {int(maximum.item())}]"
+        )
+
+
+def _log_streaming_statistics(
+    sampler: Any,
+    *,
+    device: torch.device,
+    distributed: bool,
+    rank: int,
+) -> None:
+    if not getattr(sampler, "is_streaming_node_budget", False):
+        return
+    stats = sampler.statistics()
+    sums = torch.tensor(
+        [
+            stats.emitted_samples,
+            stats.emitted_nodes,
+            stats.traversal_boundaries,
+            stats.deferred_samples,
+            stats.oversized_samples,
+            stats.skipped_samples,
+            stats.node_count_requests,
+            stats.node_count_cache_hits,
+            stats.sample_materializations,
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
+    limits = torch.tensor(
+        [stats.min_nodes, stats.max_nodes], dtype=torch.float64, device=device
+    )
+    utilization = torch.tensor(
+        [stats.mean_utilization], dtype=torch.float64, device=device
+    )
+    if distributed:
+        dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+        minimum = limits[:1].clone()
+        maximum = limits[1:].clone()
+        dist.all_reduce(minimum, op=dist.ReduceOp.MIN)
+        dist.all_reduce(maximum, op=dist.ReduceOp.MAX)
+        limits = torch.cat([minimum, maximum])
+        dist.all_reduce(utilization, op=dist.ReduceOp.SUM)
+        utilization /= dist.get_world_size()
+
+    if _is_rank_zero(rank):
+        values = sums.tolist()
+        logger.info(
+            "streaming_sampler epoch=%s steps_per_rank=%s source=%s graphs=%s "
+            "nodes=%s node_range=[%s,%s] utilization_mean=%.4f "
+            "traversal_boundaries=%s deferred=%s oversized=%s skipped=%s "
+            "count_requests=%s cache_hits=%s sample_materializations=%s",
+            stats.training_epoch,
+            stats.configured_steps,
+            stats.node_count_source,
+            int(values[0]),
+            int(values[1]),
+            int(limits[0].item()),
+            int(limits[1].item()),
+            float(utilization.item()),
+            int(values[2]),
+            int(values[3]),
+            int(values[4]),
+            int(values[5]),
+            int(values[6]),
+            int(values[7]),
+            int(values[8]),
+        )
 
 
 def _parse_optimizers(configured: Any) -> tuple[torch.optim.Optimizer, list[dict[str, Any]]]:
@@ -128,18 +304,61 @@ def _step_schedulers(
     scheduler_cfgs: list[dict[str, Any]],
     when: str,
     val_loss: float | None = None,
+    event_count: int | None = None,
+    metrics: dict[str, float | None] | None = None,
 ):
+    interval_aliases = {
+        "step": "step",
+        "steps": "step",
+        "epoch": "epoch",
+        "epochs": "epoch",
+    }
+    normalized_when = interval_aliases.get(when, when)
     for scheduler_cfg in scheduler_cfgs:
         scheduler = scheduler_cfg["scheduler"]
         interval = scheduler_cfg.get("interval", "epoch")
-        if interval != when:
+        normalized_interval = interval_aliases.get(str(interval), str(interval))
+        if normalized_interval != normalized_when:
             continue
+
+        frequency = int(scheduler_cfg.get("frequency", 1))
+        if frequency <= 0:
+            raise ValueError("Scheduler frequency must be positive.")
+
+        # Optional activation windows let multiple schedulers run in sequence,
+        # e.g. a step-based LinearLR warmup followed by ReduceLROnPlateau.
+        # Bounds are inclusive and use the same one-based counter as
+        # ``event_count`` (optimizer steps for a step scheduler).
+        start_key = f"start_{normalized_interval}"
+        end_key = f"end_{normalized_interval}"
+        start_event = int(scheduler_cfg.get(start_key, 1))
+        end_event_value = scheduler_cfg.get(end_key)
+        end_event = int(end_event_value) if end_event_value is not None else None
+        if start_event <= 0:
+            raise ValueError(f"Scheduler {start_key} must be positive.")
+        if end_event is not None and end_event < start_event:
+            raise ValueError(f"Scheduler {end_key} must be >= {start_key}.")
+
+        if event_count is not None:
+            if event_count < start_event:
+                continue
+            if end_event is not None and event_count > end_event:
+                continue
+            active_event_count = event_count - start_event + 1
+            if active_event_count % frequency != 0:
+                continue
 
         monitor_key = scheduler_cfg.get("monitor")
         if monitor_key is not None:
-            if val_loss is None:
+            monitor_value = None
+            if metrics is not None:
+                monitor_value = metrics.get(str(monitor_key))
+            elif str(monitor_key) == "loss_val":
+                monitor_value = val_loss
+
+            if monitor_value is None:
                 continue
-            scheduler.step(val_loss)
+            scheduler.step(monitor_value)
         else:
             scheduler.step()
 
@@ -322,9 +541,13 @@ def fit(
     # the legacy `native_trainer.distributed_backend` setting (use "auto" or
     # leave unset to let the helper pick the best backend for this host).
     backend_pref = native_cfg.get("distributed_backend", "auto") if native_cfg is not None else "auto"
+    trace_rank("native_fit_entered", backend_preference=backend_pref)
+    trace_rank("before_ddp_setup")
     world_size, rank = ddp_utils.setup_ddp(backend=backend_pref)
+    trace_rank("after_ddp_setup", rank=rank, world_size=world_size)
     distributed = world_size > 1
     local_rank = ddp_utils.get_local_rank() if distributed else None
+    debug_ddp = bool(native_cfg.get("debug_ddp", False))
 
     if distributed:
         logger.info("%s world_size=%s local_rank=%s", _rank_prefix(rank), world_size, local_rank)
@@ -332,12 +555,28 @@ def fit(
     if rank == 0:
         logger.info("DDP setup: %s", ddp_utils.hostname_port_summary())
 
+    trace_rank("before_device_binding", local_rank=local_rank)
     device = ddp_utils.resolve_device(local_rank)
+    trace_rank(
+        "after_device_binding",
+        device=str(device),
+        device_count=torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        device_name=(torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu"),
+        rocr_visible_devices=os.getenv("ROCR_VISIBLE_DEVICES"),
+        slurm_localid=os.getenv("SLURM_LOCALID"),
+    )
+    if distributed and debug_ddp:
+        _ddp_all_gather_preflight(device, rank, world_size)
+
+    trace_rank("before_model_to_device")
     model_module = model_module.to(device)
+    trace_rank("after_model_to_device")
     diffusion_module = model_module.diffusion_module
     model = diffusion_module
 
+    trace_rank("before_first_param_stats")
     first_name, first_mean, first_norm = _first_param_stats(model)
+    trace_rank("after_first_param_stats")
     logger.info(
         "%s pre-DDP first param: %s mean=%.6e norm=%.6e device=%s",
         _rank_prefix(rank),
@@ -349,13 +588,16 @@ def fit(
 
 
     if native_cfg.get("set_property_scalers", True):
+        trace_rank("before_property_scalers")
         compute_property_scalers(datamodule=datamodule, property_embeddings=model.model.property_embeddings)
         if hasattr(model.model, "property_embeddings_adapt"):
             compute_property_scalers(
                 datamodule=datamodule,
                 property_embeddings=model.model.property_embeddings_adapt,
             )
+        trace_rank("after_property_scalers")
 
+    trace_rank("before_ddp_wrap")
     model = ddp_utils.wrap_ddp(
         model,
         device,
@@ -364,15 +606,28 @@ def fit(
         static_graph=bool(native_cfg.get("static_graph", False)),
         gradient_as_bucket_view=bool(native_cfg.get("gradient_as_bucket_view", True)),
     )
+    trace_rank("after_ddp_wrap")
+
+    nonfinite_hook_state = None
+    if distributed and bool(native_cfg.get("log_nonfinite_local_gradients", True)):
+        nonfinite_hook_state = _NonFiniteGradientHookState(rank)
+        model.register_comm_hook(nonfinite_hook_state, _nonfinite_logging_allreduce_hook)
 
     if distributed:
+        trace_rank("before_post_ddp_barrier")
         dist.barrier()
+        trace_rank("after_post_ddp_barrier")
+        trace_rank("before_post_ddp_all_reduce")
         _ddp_collective_sanity(device, rank, world_size)
+        trace_rank("after_post_ddp_all_reduce")
         _log_model_sync(model.module, rank, world_size, tag="after_ddp_wrap")
 
 
+    trace_rank("before_optimizer_creation")
     optimizer, scheduler_cfgs = _parse_optimizers(model_module.configure_optimizers())
+    trace_rank("after_optimizer_creation")
 
+    trace_rank("before_train_dataloader")
     train_loader, train_sampler = build_split_dataloader(
         datamodule,
         "train",
@@ -381,13 +636,28 @@ def fit(
     )
     if train_loader is None:
         raise ValueError("Native DDP requires a train dataloader.")
+    trace_rank("after_train_dataloader", steps=len(train_loader))
+    trace_rank("before_loader_length_collective")
+    _assert_equal_loader_lengths(train_loader, device, distributed)
+    trace_rank("after_loader_length_collective")
+    if (
+        ckpt_path is not None
+        and getattr(train_sampler, "is_streaming_node_budget", False)
+        and _is_rank_zero(rank)
+    ):
+        logger.warning(
+            "Checkpoint loading does not restore streaming sampler state; "
+            "training starts a fresh deterministic stream at the resumed epoch."
+        )
 
+    trace_rank("before_val_dataloader")
     val_loader, _ = build_split_dataloader(
         datamodule,
         "val",
         distributed=distributed,
         shuffle=False,
     )
+    trace_rank("after_val_dataloader", steps=(len(val_loader) if val_loader is not None else 0))
 
     max_epochs = int(trainer_cfg.max_epochs)
     grad_clip = float(trainer_cfg.get("gradient_clip_val", 0.0))
@@ -436,6 +706,8 @@ def fit(
     best_k: list[tuple[float, Path]] = []
 
     for epoch in range(start_epoch, max_epochs):
+        if epoch == start_epoch:
+            trace_rank("first_epoch_entered", epoch=epoch)
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -446,14 +718,28 @@ def fit(
             # Makes sure we skip to right batch when starting from checkpoint
             if epoch == start_epoch and step_idx < resume_batch_idx:
                 continue
-            
+
+            if step_idx == 0:
+                trace_rank("first_train_batch_loaded")
+            if nonfinite_hook_state is not None:
+                nonfinite_hook_state.set_batch(
+                    batch,
+                    epoch=epoch,
+                    step=step_idx,
+                    global_step=global_step,
+                )
             batch = _to_device(batch, device)
+            if step_idx == 0:
+                trace_rank("first_train_batch_on_device")
             optimizer.zero_grad(set_to_none=True)
 
+            if step_idx == 0:
+                trace_rank("before_first_forward")
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 loss, _metrics = model(batch)
+            if step_idx == 0:
+                trace_rank("after_first_forward")
 
-            debug_ddp = bool(native_cfg.get("debug_ddp", False))
             debug_steps = int(native_cfg.get("debug_ddp_steps", 2))
 
             if debug_ddp and step_idx < debug_steps:
@@ -469,7 +755,6 @@ def fit(
                     step_idx,
                     float(loss.detach().item()),
                 )
-
 
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
@@ -493,7 +778,11 @@ def fit(
                 scaler.step(optimizer)
                 scaler.update()
             else:
+                if step_idx == 0:
+                    trace_rank("before_first_backward")
                 loss.backward()
+                if step_idx == 0:
+                    trace_rank("after_first_backward")
 
                 if debug_ddp and step_idx < debug_steps:
                     grad_norm = _grad_l2_norm(model.module if distributed else model)
@@ -511,9 +800,11 @@ def fit(
                     torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
 
                 optimizer.step()
+            if step_idx == 0:
+                trace_rank("after_first_optimizer_step")
 
-                if debug_ddp and distributed and step_idx < debug_steps:
-                    _log_model_sync(model.module, rank, world_size, tag=f"post_step_epoch={epoch}_step={step_idx}")
+            if debug_ddp and distributed and step_idx < debug_steps:
+                _log_model_sync(model.module, rank, world_size, tag=f"post_step_epoch={epoch}_step={step_idx}")
 
 
             for name, p in (model.module if distributed else model).named_parameters():
@@ -522,8 +813,17 @@ def fit(
                     break
 
 
-            _step_schedulers(scheduler_cfgs, when="step")
             reduced_loss = _mean_reduce(loss.detach(), distributed)
+            reduced_loss_value = float(reduced_loss.item())
+            _step_schedulers(
+                scheduler_cfgs,
+                when="step",
+                event_count=global_step + 1,
+                metrics={
+                    "loss_train": reduced_loss_value,
+                    "loss_train_step": reduced_loss_value,
+                },
+            )
             if debug_ddp and step_idx < debug_steps:
                 logger.info(
                     "%s epoch=%s step=%s local_loss=%.6f reduced_loss=%.6f",
@@ -531,10 +831,10 @@ def fit(
                     epoch,
                     step_idx,
                     float(loss.detach().item()),
-                    float(reduced_loss.item()),
+                    reduced_loss_value,
                 )
 
-            train_loss_sum += float(reduced_loss.item())
+            train_loss_sum += reduced_loss_value
             train_steps += 1
 
             # Increment global step and save if required
@@ -569,21 +869,40 @@ def fit(
 
             lr = optimizer.param_groups[0]['lr']
 
-            if _is_rank_zero(rank) and step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0:
-                logger.info(
-                    "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
-                    epoch,
-                    step_idx,
-                    lr,
-                    float(reduced_loss.item()),
-                    float(_metrics['pos'].item()),
-                    float(_metrics['cell'].item()),
-                    float(_metrics['atomic_numbers'].item()),
+            should_log = step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0
+            if should_log:
+                metric_keys = tuple(_metrics)
+                reduced_metric_values = _mean_reduce(
+                    torch.stack([_metrics[key].detach() for key in metric_keys]), distributed
                 )
-                if wandb_run is not None:
-                    wandb_run.log({"loss_train_step": float(reduced_loss.item()), "epoch": epoch})
+                reduced_metrics = dict(zip(metric_keys, reduced_metric_values))
+                if _is_rank_zero(rank):
+                    logger.info(
+                        "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
+                        epoch,
+                        step_idx,
+                        lr,
+                        reduced_loss_value,
+                        float(reduced_metrics.get("pos", torch.tensor(float("nan"))).item()),
+                        float(reduced_metrics.get("cell", torch.tensor(float("nan"))).item()),
+                        float(
+                            reduced_metrics.get(
+                                "atomic_numbers", torch.tensor(float("nan"))
+                            ).item()
+                        ),
+                    )
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            {"loss_train_step": reduced_loss_value, "epoch": epoch}
+                        )
 
         avg_train = train_loss_sum / max(train_steps, 1)
+        _log_streaming_statistics(
+            train_sampler,
+            device=device,
+            distributed=distributed,
+            rank=rank,
+        )
         val_loss = None
 
         lr = optimizer.param_groups[0]['lr']
@@ -604,7 +923,13 @@ def fit(
             val_loss = val_loss_sum / max(val_steps, 1)
             val_metrics = {key:val/max(val_steps,1) for key,val in val_metrics.items()}
 
-        _step_schedulers(scheduler_cfgs, when="epoch", val_loss=val_loss)
+        _step_schedulers(
+            scheduler_cfgs,
+            when="epoch",
+            val_loss=val_loss,
+            event_count=epoch + 1,
+            metrics={"loss_train": avg_train, "loss_val": val_loss},
+        )
 
         if _is_rank_zero(rank):
             logger.info(
@@ -649,6 +974,10 @@ def fit(
 
         if distributed:
             dist.barrier()
+
+    close_sampler = getattr(train_sampler, "close", None)
+    if callable(close_sampler):
+        close_sampler()
 
     ddp_utils.cleanup()
 

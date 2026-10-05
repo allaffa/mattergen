@@ -101,7 +101,6 @@ class SummedFieldLoss(Loss[T]):
         assert set([v.shape for v in loss_per_sample_per_field.values()]) == {
             (batch.get_batch_size(),)
         }, "All losses should have shape (batch_size,)."
-
         if self.reduce == "per_atom_mean":
             loss_device = next(iter(loss_per_sample_per_field.values())).device
             total_atoms = _distributed_sum(
@@ -123,7 +122,19 @@ class SummedFieldLoss(Loss[T]):
                 scalar_loss_per_field,
             )
 
-        # Aggregate losses per field over samples.
+        # ``sum`` is intentionally rank-local. DDP performs its normal mean
+        # across rank gradients; no atom/structure-count normalization is
+        # applied here.
+        if self.reduce == "sum":
+            scalar_loss_per_field = {
+                k: value.sum() for k, value in loss_per_sample_per_field.items()
+            }
+            agg_loss = torch.stack(
+                [self.loss_weights[k] * value for k, value in scalar_loss_per_field.items()]
+            ).sum()
+            return agg_loss, scalar_loss_per_field
+
+        # Aggregate losses per field over local samples.
         scalar_loss_per_field = {k: v.mean() for k, v in loss_per_sample_per_field.items()}
 
         # Dict[str, torch.Tensor], dictionary containing metrics to be logged,

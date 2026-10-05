@@ -305,6 +305,24 @@ The native backend supports:
 - `auto_resume=true` by scanning `<run_dir>/checkpoints`,
 - optional W&B logging on rank 0 from `trainer.logger` config (`type: wandb`).
 
+Node-budget training is opt-in. It continuously packs a fixed number of
+rank-local batches without constructing a dataset permutation or full batch
+plan:
+
+```bash
+mattergen-train data_module=mp_20 \
+  data_module.batching.mode=streaming_node_budget \
+  data_module.batching.target_nodes=1400 \
+  data_module.batching.max_nodes=1500 \
+  ~trainer.logger
+```
+
+`steps_per_epoch` is derived from resident node-count metadata when available.
+Set `data_module.batching.metadata_source=sample` together with an explicit
+`steps_per_epoch` for datasets that require materializing samples to determine
+their sizes. Validation and test loaders retain fixed batching. Streaming
+sampler cursor state is not stored in checkpoints.
+
 > [!NOTE]
 > For Apple Silicon training, set `trainer.accelerator=mps trainer.devices=1`.
 
