@@ -3,7 +3,8 @@ hydra:
     dir: ${oc.env:OUTPUT_DIR,outputs/singlerun/${now:%Y-%m-%d}/${now:%H-%M-%S}}
 
 auto_resume: False
-#checkpoint_path: /lustre/orion/lrn070/proj-shared/patxi/adiosdataset/mattergen/outputs/singlerun/2026-07-06/04-00-55/checkpoints/last.ckpt
+checkpoint_path: /home/3pf/projects/lrn070/mattergen/outputs/singlerun/2026-09-05/16-06-22/checkpoints/last.ckpt
+load_checkpoint_learning_rate: false
 trainer_backend: native_ddp
 
 defaults:
@@ -28,4 +29,4 @@ model_module:
   diffusion_module:
     pre_corruption_fn:
       p_unconditional: 0.4
-      dropout_fields_iid: false
+      dropout_fields_iid: true

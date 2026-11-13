@@ -64,8 +64,8 @@ def init_comm_size_and_rank() -> tuple[int, int]:
     Resolution order (matching HydraGNN):
 
     1. OpenMPI: ``OMPI_COMM_WORLD_SIZE`` + ``OMPI_COMM_WORLD_RANK``.
-    2. Slurm: ``SLURM_NPROCS`` + ``SLURM_PROCID``.
-    3. PyTorch / torchrun: ``WORLD_SIZE`` + ``RANK``.
+    2. PyTorch / torchrun: ``WORLD_SIZE`` + ``RANK``.
+    3. Slurm: ``SLURM_NPROCS`` + ``SLURM_PROCID``.
     4. Already-initialised torch.distributed group.
     5. ``mpi4py`` if importable.
     6. Single-process fallback (1, 0).
@@ -76,11 +76,11 @@ def init_comm_size_and_rank() -> tuple[int, int]:
             int(os.environ["OMPI_COMM_WORLD_RANK"]),
         )
 
-    if os.getenv("SLURM_NPROCS") and os.getenv("SLURM_PROCID"):
-        return int(os.environ["SLURM_NPROCS"]), int(os.environ["SLURM_PROCID"])
-
     if os.getenv("WORLD_SIZE") and os.getenv("RANK"):
         return int(os.environ["WORLD_SIZE"]), int(os.environ["RANK"])
+
+    if os.getenv("SLURM_NPROCS") and os.getenv("SLURM_PROCID"):
+        return int(os.environ["SLURM_NPROCS"]), int(os.environ["SLURM_PROCID"])
 
     if dist.is_available() and dist.is_initialized():
         return dist.get_world_size(), dist.get_rank()
@@ -177,7 +177,7 @@ def _select_backend(requested: str | None = None) -> str:
 def resolve_device(local_rank: int | None = None) -> torch.device:
     """Return the per-rank compute device and bind it for collectives."""
     if torch.cuda.is_available():
-        idx = local_rank if local_rank is not None else get_local_rank()
+        idx = int(local_rank) if local_rank is not None else get_local_rank()
         if idx >= torch.cuda.device_count():
             logger.warning(
                 "local_rank=%d exceeds visible CUDA device count=%d; "
@@ -190,7 +190,7 @@ def resolve_device(local_rank: int | None = None) -> torch.device:
         return torch.device("cuda", idx)
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
-        idx = local_rank if local_rank is not None else get_local_rank()
+        idx = int(local_rank) if local_rank is not None else get_local_rank()
         if idx >= torch.xpu.device_count():
             idx = idx % torch.xpu.device_count()
         torch.xpu.set_device(idx)
@@ -302,6 +302,7 @@ def setup_ddp(
         return get_world_size(), get_rank()
 
     world_size, world_rank = init_comm_size_and_rank()
+    local_rank = get_local_rank()
     trace_rank("ddp_rank_discovered", rank=world_rank, world_size=world_size)
 
     if world_size <= 1:
@@ -310,6 +311,18 @@ def setup_ddp(
         return 1, 0
 
     chosen_backend = _select_backend(backend)
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        if device_count > 0:
+            cuda_index = local_rank % device_count
+            torch.cuda.set_device(cuda_index)
+            trace_rank("before_init_set_cuda_device", local_rank=local_rank, cuda_index=cuda_index)
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device_count = torch.xpu.device_count()
+        if device_count > 0:
+            xpu_index = local_rank % device_count
+            torch.xpu.set_device(xpu_index)
+            trace_rank("before_init_set_xpu_device", local_rank=local_rank, xpu_index=xpu_index)
     master_addr = _derive_master_addr()
     base_port = _derive_master_port()
     explicit_port = os.getenv(_MASTER_PORT_ENV) is not None or os.getenv("MASTER_PORT") is not None
@@ -322,7 +335,7 @@ def setup_ddp(
         os.environ["MASTER_PORT"] = str(port)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["RANK"] = str(world_rank)
-        os.environ.setdefault("LOCAL_RANK", str(get_local_rank()))
+        os.environ.setdefault("LOCAL_RANK", str(local_rank))
 
         if world_rank == 0:
             logger.info(

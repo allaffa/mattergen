@@ -1,6 +1,7 @@
 _target_: mattergen.common.data.datamodule.CrystDataModule
 _recursive_: true
-properties: []
+properties:
+  - force_rms
   # Supported properties:
   # - dft_bulk_modulus
   # - dft_band_gap
@@ -20,8 +21,12 @@ transforms:
 - _target_: mattergen.common.data.transform.set_chemical_system_string
   _partial_: true
 
-average_density: 0.051251229184970416 # atoms/Angstrom**3
-root_dir: ${oc.env:PROJECT_ROOT}/../../../adios/data/miniOMat24
+average_density: 0.05 # atoms/Angstrom**3
+#root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/miniOMat24-forces-rms-lt-0.1.bp
+#root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/miniOMat24-forces-85k.bp
+#root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/OMat24-force-filtered.bp
+#root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/OMat24-force-filtered-cell-filtered.bp
+root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/miniOMat24-forces-3M.bp
 
 train_dataset:
   _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn
@@ -47,7 +52,7 @@ batch_size:
   # total batch size of 512, adjust for number of devices, nodes, and gradient accumulation
   # train:  ${eval:'((512//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
   # val: ${eval:'((128//1) // ${trainer.accumulate_grad_batches}) // (${trainer.devices} * ${trainer.num_nodes})'}
-  train:  ${eval:'(512//8)'}
-  val: ${eval:'(512//8)'}
+  train:  ${eval:'(512//16)'}
+  val: ${eval:'(512//16)'}
 
 max_epochs: 50000

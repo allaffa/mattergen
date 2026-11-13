@@ -15,6 +15,10 @@ class Config:
 
     checkpoint_path: str | None = None  # Required if train == False
 
+    # If False, checkpoint loading keeps optimizer state but restores the
+    # learning rate from the current config.
+    load_checkpoint_learning_rate: bool = False
+
     seed: int | None = None
 
     # if load_original is True then we load original weights in validation mode instead of EMA

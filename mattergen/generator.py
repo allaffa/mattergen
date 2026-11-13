@@ -246,7 +246,7 @@ class CrystalGenerator:
     distributed: bool | None = None
 
     # local rank
-    local_rank: str | None = None
+    local_rank: int | None = None
 
     record_trajectories: bool = True  # store all intermediate samples by default
 

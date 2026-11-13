@@ -4,6 +4,35 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        {
+            "name": "RunJogo: debug training on GPU 2",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "mattergen.scripts.run",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "/home/3pf/miniconda3/envs/hydragnn/bin/python",
+            "justMyCode": false,
+            "env": {
+                "CUDA_DEVICE": "2",
+                "CUDA_VISIBLE_DEVICES": "2",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+                "OMP_NUM_THREADS": "7",
+                "PROJECT_ROOT": "${workspaceFolder}",
+                "PYTHONFAULTHANDLER": "1",
+                "PYTHONPATH": "${workspaceFolder}",
+                "PYTHONUNBUFFERED": "1"
+            },
+            "args": [
+                "data_module=miniOmat24",
+                "~trainer.logger",
+                "trainer.accelerator=gpu",
+                "trainer.devices=1",
+                "trainer.num_nodes=1",
+                "native_trainer.log_every_n_steps=10"
+            ]
+        },
 
         {
             "name": "Python Debugger: Current File",

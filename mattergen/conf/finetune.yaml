@@ -5,7 +5,7 @@ hydra:
 trainer_backend: native_ddp
 
 defaults:
-  - data_module: mp_20
+  - data_module: mp_20_adios
   - trainer: default
   - native_trainer: default
   - model_module: default

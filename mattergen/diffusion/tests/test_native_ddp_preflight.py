@@ -13,6 +13,9 @@ from mattergen.diffusion.native_ddp import (
     _TRAINING_LIMIT_STEPS,
     _TRAINING_LIMIT_TIME,
     _ddp_all_gather_preflight,
+    _capture_optimizer_lr_settings,
+    _restore_optimizer_lr_settings,
+    _step_schedulers,
     _synchronize_training_limit,
     _training_limit_code,
 )
@@ -86,6 +89,65 @@ def test_training_limits_stop_at_first_configured_boundary():
         )
         == _TRAINING_LIMIT_TIME
     )
+
+
+def test_optimizer_lr_can_be_restored_after_loading_checkpoint_state():
+    parameter = torch.nn.Parameter(torch.tensor(1.0))
+    optimizer = torch.optim.Adam([parameter], lr=1e-5)
+    configured_lr_settings = _capture_optimizer_lr_settings(optimizer)
+
+    checkpoint_parameter = torch.nn.Parameter(torch.tensor(1.0))
+    checkpoint_optimizer = torch.optim.Adam([checkpoint_parameter], lr=1e-4)
+    optimizer.load_state_dict(checkpoint_optimizer.state_dict())
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-4)
+
+    _restore_optimizer_lr_settings(optimizer, configured_lr_settings)
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-5)
+
+
+class _CountingScheduler:
+    def __init__(self) -> None:
+        self.steps: list[float | None] = []
+
+    def step(self, value: float | None = None) -> None:
+        self.steps.append(value)
+
+
+def test_step_scheduler_accepts_plural_steps_interval():
+    scheduler = _CountingScheduler()
+
+    _step_schedulers(
+        [{"scheduler": scheduler, "interval": "steps", "frequency": 1}],
+        when="step",
+        event_count=1,
+    )
+
+    assert scheduler.steps == [None]
+
+
+def test_scheduler_frequency_is_honored():
+    scheduler = _CountingScheduler()
+    scheduler_cfgs = [{"scheduler": scheduler, "interval": "steps", "frequency": 2}]
+
+    _step_schedulers(scheduler_cfgs, when="step", event_count=1)
+    _step_schedulers(scheduler_cfgs, when="step", event_count=2)
+
+    assert scheduler.steps == [None]
+
+
+def test_monitored_scheduler_uses_named_metric():
+    scheduler = _CountingScheduler()
+
+    _step_schedulers(
+        [{"scheduler": scheduler, "interval": "epoch", "monitor": "loss_train"}],
+        when="epoch",
+        event_count=1,
+        metrics={"loss_train": 1.25, "loss_val": 9.0},
+    )
+
+    assert scheduler.steps == [1.25]
 
 
 def _training_limit_worker(rank: int, init_file: str) -> None:

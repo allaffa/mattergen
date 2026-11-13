@@ -108,6 +108,7 @@ def main(
     ckpt_path = config.checkpoint_path
     if config.auto_resume:
         ckpt_path = _find_latest_checkpoint(str(Path(os.getcwd()) / "checkpoints"))
+    load_checkpoint_learning_rate = bool(config.get("load_checkpoint_learning_rate", False))
 
     model_module_cfg = resolve_model_module_cfg(config)
     trace_rank("before_model_instantiation")
@@ -122,6 +123,7 @@ def main(
         native_cfg=config.native_trainer,
         config_dict=config_as_dict,
         ckpt_path=ckpt_path,
+        load_checkpoint_learning_rate=load_checkpoint_learning_rate,
     )
     trace_rank("after_native_fit")
 

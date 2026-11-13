@@ -17,7 +17,7 @@ dataset_transforms:
     _partial_: true
 
 average_density: 0.05771451654022283 # atoms/Angstrom**3 : this is used in models/scripts/run.py to set lattice_limit_density
-root_dir: /lustre/orion/lrn070/proj-shared/patxi/adios/data/mp20
+root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/mp_20-with-forces.bp
 
 train_dataset:
   _target_: mattergen.common.data.dataset.CrystalDataset.from_adios_file_hydragnn

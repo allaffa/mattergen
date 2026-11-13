@@ -4,11 +4,13 @@ hydra:
 
 auto_resume: False
 seed: null
-checkpoint_path: null
+#checkpoint_path: /home/3pf/projects/lrn070/mattergen/outputs/singlerun/2026-09-05/16-47-58/checkpoints/last.ckpt
+load_checkpoint_learning_rate: true
 trainer_backend: native_ddp
 
 defaults:
-  - data_module: OMat24-v2
+  #- data_module: OMat24-v2
+  - data_module: mp_20_adios
   - trainer: default
   - native_trainer: default
   - model_module: default

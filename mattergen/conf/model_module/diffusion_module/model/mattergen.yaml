@@ -29,4 +29,3 @@ defaults: # NOTE: to train a conditional model, unccoment entries such as proper
   # - property_embeddings@property_embeddings.dft_bulk_modulus: dft_bulk_modulus
   - property_embeddings@property_embeddings.force_rms: force_rms
   - property_embeddings@property_embeddings.chemical_system: chemical_system
-
