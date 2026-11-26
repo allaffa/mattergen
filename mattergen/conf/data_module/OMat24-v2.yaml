@@ -22,7 +22,7 @@ transforms:
   _partial_: true
 
 average_density: 0.05 # atoms/Angstrom**3
-root_dir: /lustre/orion/world-shared/lrn070/jyc/frontier/dataset_sc26_restripe/OMat24-v2.bp
+root_dir: /lustre/orion/lrn110/world-shared/mlupopa/MatterGen/mattergen/datasets/OMat24-v2.bp
 #root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/miniOMat24-forces-3M.bp
 
 train_dataset:
