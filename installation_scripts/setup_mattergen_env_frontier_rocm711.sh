@@ -324,10 +324,12 @@ PY
 
 echo "Installing conda-pack and writing relocatable environment archive"
 mkdir -p "$(dirname "${ARCHIVE_PATH}")"
+# pip upgrades itself over the conda-managed pip; its stale conda records are harmless.
 conda pack \
     --format tar.gz \
     --n-threads -1 \
     --force \
+    --ignore-missing-files \
     --prefix "${ENV_PATH}" \
     --output "${ARCHIVE_PATH}"
 [[ -s "${ARCHIVE_PATH}" ]] || die "conda-pack did not create ${ARCHIVE_PATH}"
