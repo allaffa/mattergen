@@ -416,5 +416,6 @@ FodyWeavers.xsd
 outputs/singlerun/
 outputs/chain-*/
 datasets/cache/
+datasets/*.bp/
 jobOutputs/
 build/
