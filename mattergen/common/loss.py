@@ -4,10 +4,13 @@
 from functools import partial
 from typing import Dict, Literal, Optional
 
+import torch
+
 from mattergen.diffusion.losses import LossReduction, SummedFieldLoss, denoising_score_matching
 from mattergen.diffusion.model_target import ModelTarget
 from mattergen.diffusion.training.field_loss import FieldLoss, d3pm_loss
 from mattergen.diffusion.wrapped.wrapped_normal_loss import wrapped_normal_loss
+from mattergen.property_embeddings import _USE_UNCONDITIONAL_EMBEDDING
 
 
 class MaterialsLoss(SummedFieldLoss):
@@ -56,3 +59,23 @@ class MaterialsLoss(SummedFieldLoss):
             model_targets=model_targets,
             reduce=reduce,
         )
+
+    def extra_metrics(self, batch, loss_per_sample_per_field):
+        # Sums and counts (not means) so ratios stay exact after mean-reducing across ranks.
+        try:
+            use_uncond = batch[_USE_UNCONDITIONAL_EMBEDDING]
+        except (KeyError, AttributeError):
+            return {}
+        with torch.no_grad():
+            total = sum(
+                self.loss_weights[k] * v.detach().float()
+                for k, v in loss_per_sample_per_field.items()
+            )
+            metrics = {}
+            for field, uncond in use_uncond.items():
+                cond = ~uncond.reshape(-1).to(total.device)
+                metrics[f"cond/{field}/loss_sum_on"] = total[cond].sum()
+                metrics[f"cond/{field}/n_on"] = cond.sum().float()
+                metrics[f"cond/{field}/loss_sum_off"] = total[~cond].sum()
+                metrics[f"cond/{field}/n_off"] = (~cond).sum().float()
+        return metrics

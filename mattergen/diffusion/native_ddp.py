@@ -201,6 +201,21 @@ def _mean_reduce(value: torch.Tensor, distributed: bool) -> torch.Tensor:
     return value
 
 
+def _format_cond_metrics(metrics: dict) -> str:
+    parts = []
+    for key in sorted(metrics):
+        if not (key.startswith("cond/") and key.endswith("/loss_sum_on")):
+            continue
+        field = key[len("cond/") : -len("/loss_sum_on")]
+        values = []
+        for state in ("on", "off"):
+            n = float(metrics[f"cond/{field}/n_{state}"])
+            s = float(metrics[f"cond/{field}/loss_sum_{state}"])
+            values.append(s / n if n > 0 else float("nan"))
+        parts.append(f"{field}: cond={values[0]:.4f} uncond={values[1]:.4f} gap={values[1] - values[0]:+.4f}")
+    return " | ".join(parts)
+
+
 def _assert_equal_loader_lengths(loader: Any, device: torch.device, distributed: bool) -> None:
     """Fail before training if a fixed-step sampler disagrees across ranks."""
 
@@ -879,7 +894,7 @@ def fit(
             if should_log:
                 metric_keys = tuple(_metrics)
                 reduced_metric_values = _mean_reduce(
-                    torch.stack([_metrics[key].detach() for key in metric_keys]), distributed
+                    torch.stack([_metrics[key].detach().float() for key in metric_keys]), distributed
                 )
                 reduced_metrics = dict(zip(metric_keys, reduced_metric_values))
                 if _is_rank_zero(rank):
@@ -897,6 +912,9 @@ def fit(
                             ).item()
                         ),
                     )
+                    cond_summary = _format_cond_metrics(reduced_metrics)
+                    if cond_summary:
+                        logger.info("epoch=%s step=%s cond_train %s", epoch, step_idx, cond_summary)
                     if wandb_run is not None:
                         wandb_run.log(
                             {"loss_train_step": reduced_loss_value, "epoch": epoch}
@@ -918,12 +936,20 @@ def fit(
             val_loss_sum = 0.0
             val_steps = 0
             val_metrics = {'atomic_numbers':0,'pos':0,'cell':0}
+            val_cond_metrics = {}
             with torch.no_grad():
                 for batch in val_loader:
                     batch = _to_device(batch, device)
                     loss, _metrics = calc_loss(model.module, batch) if distributed else calc_loss(model, batch)
                     reduced_loss = _mean_reduce(loss.detach(), distributed)
                     val_metrics = {key:float(_mean_reduce(_metrics[key].detach(),distributed).item())+val for key,val in val_metrics.items()}
+                    cond_keys = sorted(k for k in _metrics if k.startswith("cond/"))
+                    if cond_keys:
+                        reduced_cond = _mean_reduce(
+                            torch.stack([_metrics[k].detach().float() for k in cond_keys]), distributed
+                        )
+                        for k, v in zip(cond_keys, reduced_cond.tolist()):
+                            val_cond_metrics[k] = val_cond_metrics.get(k, 0.0) + v
                     val_loss_sum += float(reduced_loss.item())
                     val_steps += 1
             val_loss = val_loss_sum / max(val_steps, 1)
@@ -948,6 +974,10 @@ def fit(
                 val_metrics['cell'],
                 val_metrics['atomic_numbers'],
             )
+            if val_loss is not None:
+                cond_summary = _format_cond_metrics(val_cond_metrics)
+                if cond_summary:
+                    logger.info("epoch=%s cond_val %s", epoch, cond_summary)
             if wandb_run is not None:
                 metrics = {"loss_train": avg_train, "epoch": epoch}
                 if val_loss is not None:

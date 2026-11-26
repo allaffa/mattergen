@@ -101,6 +101,7 @@ class SummedFieldLoss(Loss[T]):
         assert set([v.shape for v in loss_per_sample_per_field.values()]) == {
             (batch.get_batch_size(),)
         }, "All losses should have shape (batch_size,)."
+        extra_metrics = self.extra_metrics(batch, loss_per_sample_per_field)
         if self.reduce == "per_atom_mean":
             loss_device = next(iter(loss_per_sample_per_field.values())).device
             total_atoms = _distributed_sum(
@@ -119,7 +120,7 @@ class SummedFieldLoss(Loss[T]):
             ).sum()
             return (
                 agg_loss,
-                scalar_loss_per_field,
+                {**scalar_loss_per_field, **extra_metrics},
             )
 
         # ``sum`` is intentionally rank-local. DDP performs its normal mean
@@ -132,13 +133,13 @@ class SummedFieldLoss(Loss[T]):
             agg_loss = torch.stack(
                 [self.loss_weights[k] * value for k, value in scalar_loss_per_field.items()]
             ).sum()
-            return agg_loss, scalar_loss_per_field
+            return agg_loss, {**scalar_loss_per_field, **extra_metrics}
 
         # Aggregate losses per field over local samples.
         scalar_loss_per_field = {k: v.mean() for k, v in loss_per_sample_per_field.items()}
 
         # Dict[str, torch.Tensor], dictionary containing metrics to be logged,
-        metrics_dict = scalar_loss_per_field
+        metrics_dict = {**scalar_loss_per_field, **extra_metrics}
         # This is the loss that is used for backpropagation (after mean aggregation over samples).
         # Shape: (batch_size,)
         agg_loss = torch.stack(
@@ -149,6 +150,11 @@ class SummedFieldLoss(Loss[T]):
             agg_loss.mean(),
             metrics_dict,
         )
+
+    def extra_metrics(
+        self, batch: T, loss_per_sample_per_field: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        return {}
 
 
 class DenoisingScoreMatchingLoss(SummedFieldLoss):
