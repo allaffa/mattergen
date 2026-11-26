@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH -A LRN070
+#SBATCH -A LRN087
 #SBATCH -J mattergen-train
 #SBATCH -o jobOutputs/mattergen-train-%j.out
 #SBATCH -e jobOutputs/mattergen-train-%j.out
-#SBATCH -t 00:30:00
+#SBATCH -t 12:00:00
 #SBATCH -p batch
 ##SBATCH -q debug
-#SBATCH -N 32
+#SBATCH -N 512
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-task=1
 #SBATCH --gpu-bind=closest
@@ -56,6 +56,38 @@ LOCAL_ENV_ARCHIVE="${LOCAL_ENV_ROOT}.tar.gz"
 # Options (override on submission if desired)
 DATA_MODULE="${DATA_MODULE:-OMat24-v2}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
+# Number of follow-up jobs to queue (afterany) so a crash or timeout resumes automatically.
+RESUBMITS_LEFT="${RESUBMITS_LEFT:-0}"
+# Set to 1 only when resuming with a changed scheduler config; follow-up jobs reset it to 0.
+RESET_SCHEDULERS="${RESET_SCHEDULERS:-0}"
+
+# A fixed Hydra output dir lets follow-up jobs find the previous job's last.ckpt.
+if [[ -z "${OUTPUT_DIR:-}" && "${RESUBMITS_LEFT}" -gt 0 ]]; then
+    OUTPUT_DIR="${REPO_ROOT}/outputs/chain-${SLURM_JOB_ID}"
+fi
+if [[ -n "${OUTPUT_DIR:-}" ]]; then
+    export OUTPUT_DIR
+    if [[ -s "${OUTPUT_DIR}/checkpoints/last.ckpt" ]]; then
+        CHECKPOINT_PATH="${OUTPUT_DIR}/checkpoints/last.ckpt"
+    fi
+fi
+
+if [[ "${RESUBMITS_LEFT}" -gt 0 ]]; then
+    next_job=$(cd "${REPO_ROOT}" && sbatch --parsable \
+        --dependency="afterany:${SLURM_JOB_ID}" \
+        --export=ALL,RESUBMITS_LEFT=$((RESUBMITS_LEFT - 1)),RESET_SCHEDULERS=0,OUTPUT_DIR="${OUTPUT_DIR}",CHECKPOINT_PATH="${CHECKPOINT_PATH}" \
+        "${REPO_ROOT}/job-frontier-mattergen-train-rocm711.sh")
+    echo "Queued follow-up job ${next_job} (resubmits left after it: $((RESUBMITS_LEFT - 1)))"
+fi
+
+EXTRA_ARGS=""
+if [[ "${RESET_SCHEDULERS}" == "1" ]]; then
+    EXTRA_ARGS="native_trainer.restore_scheduler_states=false"
+fi
+
+echo "git_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+echo "git_branch=$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+echo "git_dirty_files=$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no 2>/dev/null | wc -l)"
 
 cd "${REPO_ROOT}"
 mkdir -p jobOutputs
@@ -187,6 +219,7 @@ module load rccl-net-plugin
 
 echo "Job ${SLURM_JOB_ID}: ${SLURM_JOB_NUM_NODES} nodes, ${SLURM_NTASKS} GPU ranks, data_module=${DATA_MODULE}"
 echo "CHECKPOINT_PATH=${CHECKPOINT_PATH:-<none>}"
+echo "OUTPUT_DIR=${OUTPUT_DIR:-<hydra default>} RESUBMITS_LEFT=${RESUBMITS_LEFT} EXTRA_ARGS=${EXTRA_ARGS:-<none>}"
 echo "repo=${REPO_ROOT}"
 echo "python=$(command -v python)"
 echo "conda_prefix=${CONDA_PREFIX:-<unset>}"
@@ -198,6 +231,7 @@ module list
 
 export DATA_MODULE
 export CHECKPOINT_PATH
+export EXTRA_ARGS
 
 srun \
     --ntasks="${SLURM_NTASKS}" \
@@ -228,10 +262,10 @@ PY
             exec mattergen-train \
                 data_module="${DATA_MODULE}" \
                 checkpoint_path="${CHECKPOINT_PATH}" \
-                ~trainer.logger
+                ~trainer.logger ${EXTRA_ARGS}
         else
             exec mattergen-train \
                 data_module="${DATA_MODULE}" \
-                ~trainer.logger
+                ~trainer.logger ${EXTRA_ARGS}
         fi
     '

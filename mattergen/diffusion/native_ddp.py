@@ -441,6 +441,7 @@ def _load_checkpoint(
     model_module: DiffusionModelModule[BatchedData],
     optimizer: torch.optim.Optimizer,
     scheduler_cfgs: list[dict[str, Any]],
+    restore_scheduler_states: bool = True,
 ) -> tuple[int, int, int, float | None]:
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     model_module.load_state_dict(checkpoint["state_dict"], strict=True)
@@ -449,7 +450,8 @@ def _load_checkpoint(
     if optimizer_states:
         optimizer.load_state_dict(optimizer_states[0])
 
-    scheduler_states = checkpoint.get("scheduler_states", [])
+    # Skipping lets a resumed run adopt a changed scheduler config; the LR still comes from the optimizer state.
+    scheduler_states = checkpoint.get("scheduler_states", []) if restore_scheduler_states else []
     for scheduler_cfg, scheduler_state in zip(scheduler_cfgs, scheduler_states):
         scheduler_cfg["scheduler"].load_state_dict(scheduler_state)
 
@@ -690,18 +692,22 @@ def fit(
     start_epoch = 0
     resume_batch_idx = 0
     global_step = 0
+    restore_scheduler_states = bool(native_cfg.get("restore_scheduler_states", True))
     if ckpt_path is not None:
         start_epoch, resume_batch_idx, global_step, loaded_best = _load_checkpoint(
             ckpt_path,
             model_module=model_module,
             optimizer=optimizer,
             scheduler_cfgs=scheduler_cfgs,
+            restore_scheduler_states=restore_scheduler_states,
         )
         if loaded_best is not None:
             best_val = float(loaded_best)
         if _is_rank_zero(rank):
-            logger.info("Resumed native training from %s at epoch=%s batch=%s global_step=%s", 
-                        ckpt_path, start_epoch, resume_batch_idx, global_step,)
+            logger.info("Resumed native training from %s at epoch=%s batch=%s global_step=%s "
+                        "lr=%s restore_scheduler_states=%s",
+                        ckpt_path, start_epoch, resume_batch_idx, global_step,
+                        optimizer.param_groups[0]["lr"], restore_scheduler_states)
 
     best_k: list[tuple[float, Path]] = []
 

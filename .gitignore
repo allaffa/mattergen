@@ -414,5 +414,7 @@ FodyWeavers.xsd
 
 # Generated run outputs and caches
 outputs/singlerun/
+outputs/chain-*/
 datasets/cache/
 jobOutputs/
+build/

@@ -9,6 +9,8 @@ static_graph: false
 gradient_as_bucket_view: true
 use_amp: false
 amp_dtype: float16
-log_every_n_steps: 100
+log_every_n_steps: 10
+# Set false when resuming with a changed scheduler config.
+restore_scheduler_states: true
 debug_ddp: false
 debug_ddp_steps: 2

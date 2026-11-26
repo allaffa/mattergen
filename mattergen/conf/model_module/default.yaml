@@ -26,23 +26,21 @@ scheduler_partials:
     frequency: 1
     start_step: 1
     end_step: 2000
-  # After warmup, evaluate the globally averaged DDP training loss every 50
-  # optimizer steps and reduce the learning rate when it plateaus.
+  # Reduce the LR when the per-epoch validation loss plateaus.
   - scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
       mode: min
-      factor: 0.75
-      patience: 1000
-      threshold: 0.0001
+      factor: 0.5
+      patience: 2
+      threshold: 1.0e-3
       threshold_mode: rel
-      cooldown: 0
+      cooldown: 1
       min_lr: 1.0e-6
       eps: 1.0e-8
       _partial_: true
     # interval accepts step/steps or epoch/epochs. ReduceLROnPlateau.patience
     # counts scheduler evaluations, not raw optimizer steps.
-    interval: step
-    frequency: 50
-    start_step: 2001
-    monitor: loss_train_step
+    interval: epoch
+    frequency: 1
+    monitor: loss_val
 
