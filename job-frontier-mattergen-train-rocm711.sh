@@ -261,7 +261,7 @@ PY
         if [ -n "${CHECKPOINT_PATH}" ]; then
             exec mattergen-train \
                 data_module="${DATA_MODULE}" \
-                checkpoint_path="${CHECKPOINT_PATH}" \
+                ++checkpoint_path="${CHECKPOINT_PATH}" \
                 ~trainer.logger ${EXTRA_ARGS}
         else
             exec mattergen-train \
