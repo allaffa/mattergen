@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -A LRN087
+#SBATCH -A LRN110
 #SBATCH -J mattergen-train
 #SBATCH -o jobOutputs/mattergen-train-%j.out
 #SBATCH -e jobOutputs/mattergen-train-%j.out
@@ -46,7 +46,7 @@ SCRIPT_DIR="${REPO_ROOT}/installation_scripts"
 }
 
 # Packed ROCm 7.1.1 environment created by your setup script
-ENV_SOURCE_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn070/proj-shared/${USER}/envs/mattergen-rocm711}"
+ENV_SOURCE_PATH="${MATTERGEN_ENV_PATH:-/lustre/orion/lrn110/proj-shared/${USER}/envs/mattergen-rocm711}"
 ENV_ARCHIVE="${MATTERGEN_ENV_ARCHIVE:-${ENV_SOURCE_PATH}.tar.gz}"
 
 # Node-local NVMe staging location
