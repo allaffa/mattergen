@@ -3,9 +3,17 @@ from torch.utils.data import Dataset
 from mattergen.common.data.chemgraph import ChemGraph
 from mattergen.common.utils.rank_debug import trace_rank
 import adios2
+import logging
 import numpy as np
+import os
 import re
+import time
 from threading import Lock
+
+logger = logging.getLogger(__name__)
+
+_READ_RETRIES = int(os.environ.get("MATTERGEN_ADIOS_READ_RETRIES", "5"))
+_READ_RETRY_BASE_DELAY = float(os.environ.get("MATTERGEN_ADIOS_READ_RETRY_DELAY", "1.0"))
 
 
 def _parse_adios_shape(value, variable):
@@ -119,6 +127,46 @@ class HydraGNNAdiosCrystalDataset(Dataset):
         selection[0] = count
         return np.asarray(self.f.read(variable, start, selection))
 
+    def _read_sample(self, idx):
+        atomic_numbers = torch.as_tensor(
+            self._read_ragged_sample("atomic_numbers", idx)
+        ).reshape(-1).long()
+        pos = torch.as_tensor(
+            self._read_ragged_sample("pos", idx), dtype=torch.float32
+        )
+        cell = torch.as_tensor(
+            self._read_ragged_sample("cell", idx), dtype=torch.float32
+        ).reshape(3, 3)
+        forces = None
+        if "force_rms" in self.property_names:
+            forces = torch.as_tensor(
+                self._read_ragged_sample("forces", idx), dtype=torch.float32
+            ).reshape(-1, 3)
+        return atomic_numbers, pos, cell, forces
+
+    def _read_sample_with_retry(self, idx):
+        # Transient Lustre I/O errors surface as RuntimeError from ADIOS2; one bad read must not kill a 4096-rank job.
+        for attempt in range(_READ_RETRIES + 1):
+            try:
+                return self._read_sample(idx)
+            except RuntimeError as exc:
+                if "ADIOS2" not in str(exc) or attempt == _READ_RETRIES:
+                    raise
+                delay = _READ_RETRY_BASE_DELAY * (2**attempt)
+                logger.warning(
+                    "ADIOS read failed for %s sample %s (attempt %s/%s), reopening in %.1fs: %s",
+                    self.label, idx, attempt + 1, _READ_RETRIES, delay, exc,
+                )
+                time.sleep(delay)
+                self._reopen()
+
+    def _reopen(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+        self.f = adios2.FileReader(self.filename)
+
     def read_node_counts_range(self, start, count):
         """Read contiguous ``natoms`` metadata without materializing samples."""
 
@@ -142,20 +190,7 @@ class HydraGNNAdiosCrystalDataset(Dataset):
             raise IndexError(idx)
 
         with self._reader_lock:
-            atomic_numbers = torch.as_tensor(
-                self._read_ragged_sample("atomic_numbers", idx)
-            ).reshape(-1).long()
-            pos = torch.as_tensor(
-                self._read_ragged_sample("pos", idx), dtype=torch.float32
-            )
-            cell = torch.as_tensor(
-                self._read_ragged_sample("cell", idx), dtype=torch.float32
-            ).reshape(3, 3)
-            forces = None
-            if "force_rms" in self.property_names:
-                forces = torch.as_tensor(
-                    self._read_ragged_sample("forces", idx), dtype=torch.float32
-                ).reshape(-1, 3)
+            atomic_numbers, pos, cell, forces = self._read_sample_with_retry(idx)
 
         natoms = int(atomic_numbers.numel())
         props = {}
