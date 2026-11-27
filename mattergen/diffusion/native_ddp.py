@@ -162,6 +162,8 @@ def _ddp_all_gather_preflight(
     dist.all_gather_into_tensor(gathered_ranks, local_rank)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+    elif device.type == "xpu":
+        torch.xpu.synchronize(device)
 
     expected = torch.arange(world_size, dtype=torch.int64, device=device)
     if not torch.equal(gathered_ranks, expected):
