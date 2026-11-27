@@ -17,7 +17,8 @@
 # Smoke test:
 #   qsub -q debug -l select=2 -l walltime=00:30:00 job-aurora-mattergen-train.pbs
 # Options (pass with -v VAR=value,...):
-#   DATA_MODULE, CHECKPOINT_PATH, OUTPUT_DIR, RESUBMITS_LEFT, RESET_SCHEDULERS
+#   DATA_MODULE, CHECKPOINT_PATH, OUTPUT_DIR, RESUBMITS_LEFT, RESET_SCHEDULERS,
+#   EXTRA_OVERRIDES (space-separated Hydra overrides, no commas)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -62,9 +63,9 @@ if [[ "${RESUBMITS_LEFT}" -gt 0 ]]; then
     echo "Queued follow-up job ${next_job} (resubmits left after it: $((RESUBMITS_LEFT - 1)))"
 fi
 
-EXTRA_ARGS=""
+EXTRA_ARGS="${EXTRA_OVERRIDES:-}"
 if [[ "${RESET_SCHEDULERS}" == "1" ]]; then
-    EXTRA_ARGS="native_trainer.restore_scheduler_states=false"
+    EXTRA_ARGS="${EXTRA_ARGS} native_trainer.restore_scheduler_states=false"
 fi
 
 # ---------------------------------------------------------------------------

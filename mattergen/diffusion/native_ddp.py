@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -222,6 +224,60 @@ def _mean_reduce_loss_and_metrics(
     packed = torch.stack([loss.detach().float()] + [metrics[k].detach().float() for k in keys])
     reduced = _mean_reduce(packed, distributed)
     return reduced[0], dict(zip(keys, reduced[1:]))
+
+
+def _device_synchronize(device: torch.device) -> None:
+    if device.type == "xpu":
+        torch.xpu.synchronize(device)
+    elif device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _device_reserved_gb(device: torch.device) -> float:
+    if device.type == "xpu":
+        return torch.xpu.memory_reserved(device) / 2**30
+    if device.type == "cuda":
+        return torch.cuda.memory_reserved(device) / 2**30
+    return 0.0
+
+
+_STEP_TIMING_FIELDS = ("data", "forward", "backward_opt", "num_nodes", "reserved_gb")
+
+
+def _log_step_timing(
+    local: list[float], device: torch.device, distributed: bool, rank: int, epoch: int, step: int
+) -> None:
+    values = torch.tensor(local, dtype=torch.float32, device=device)
+    if distributed:
+        gathered = [torch.empty_like(values) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered, values)
+        table = torch.stack(gathered).cpu()
+    else:
+        table = values.cpu().unsqueeze(0)
+    median = table.median(dim=0).values
+    fwd = _STEP_TIMING_FIELDS.index("forward")
+    if _is_rank_zero(rank):
+        slowest = int(table[:, fwd].argmax())
+        logger.info(
+            "step_timing epoch=%s step=%s median %s | max %s | slowest_forward_rank=%s %s",
+            epoch,
+            step,
+            " ".join(f"{k}={v:.3f}" for k, v in zip(_STEP_TIMING_FIELDS, median.tolist())),
+            " ".join(f"{k}={v:.3f}" for k, v in zip(_STEP_TIMING_FIELDS, table.max(dim=0).values.tolist())),
+            slowest,
+            " ".join(f"{k}={v:.3f}" for k, v in zip(_STEP_TIMING_FIELDS, table[slowest].tolist())),
+        )
+    # Backward includes the gradient all-reduce, so only forward isolates a straggler's own compute.
+    if local[fwd] > 1.5 * float(median[fwd]) + 0.5:
+        logger.warning(
+            "%s straggler host=%s ZE_AFFINITY_MASK=%s epoch=%s step=%s %s",
+            _rank_prefix(rank),
+            socket.gethostname(),
+            os.environ.get("ZE_AFFINITY_MASK", ""),
+            epoch,
+            step,
+            " ".join(f"{k}={v:.3f}" for k, v in zip(_STEP_TIMING_FIELDS, local)),
+        )
 
 
 def _format_cond_metrics(metrics: dict) -> str:
@@ -748,6 +804,7 @@ def fit(
                         optimizer.param_groups[0]["lr"], restore_scheduler_states)
 
     best_k: list[tuple[float, Path]] = []
+    step_timing_every = int(native_cfg.get("step_timing_every_n_steps", 0))
 
     for epoch in range(start_epoch, max_epochs):
         if epoch == start_epoch:
@@ -758,10 +815,13 @@ def fit(
         model.train()
         train_loss_sum = 0.0
         train_steps = 0
+        step_end = time.perf_counter()
         for step_idx, batch in enumerate(train_loader):
             # Makes sure we skip to right batch when starting from checkpoint
             if epoch == start_epoch and step_idx < resume_batch_idx:
                 continue
+
+            timed = step_timing_every > 0 and step_idx % step_timing_every == 0
 
             if step_idx == 0:
                 trace_rank("first_train_batch_loaded")
@@ -773,6 +833,9 @@ def fit(
                     global_step=global_step,
                 )
             batch = _to_device(batch, device)
+            if timed:
+                _device_synchronize(device)
+                t_data = time.perf_counter()
             if step_idx == 0:
                 trace_rank("first_train_batch_on_device")
             optimizer.zero_grad(set_to_none=True)
@@ -781,6 +844,9 @@ def fit(
                 trace_rank("before_first_forward")
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 loss, _metrics = model(batch)
+            if timed:
+                _device_synchronize(device)
+                t_fwd = time.perf_counter()
             if step_idx == 0:
                 trace_rank("after_first_forward")
 
@@ -850,6 +916,23 @@ def fit(
                 optimizer.step()
             if step_idx == 0:
                 trace_rank("after_first_optimizer_step")
+            if timed:
+                _device_synchronize(device)
+                t_opt = time.perf_counter()
+                _log_step_timing(
+                    [
+                        t_data - step_end,
+                        t_fwd - t_data,
+                        t_opt - t_fwd,
+                        float(batch.num_nodes),
+                        _device_reserved_gb(device),
+                    ],
+                    device,
+                    distributed,
+                    rank,
+                    epoch,
+                    step_idx,
+                )
 
             if debug_ddp and distributed and step_idx < debug_steps:
                 _log_model_sync(model.module, rank, world_size, tag=f"post_step_epoch={epoch}_step={step_idx}")
@@ -941,6 +1024,7 @@ def fit(
                         wandb_run.log(
                             {"loss_train_step": reduced_loss_value, "epoch": epoch}
                         )
+            step_end = time.perf_counter()
 
         avg_train = train_loss_sum / max(train_steps, 1)
         _log_streaming_statistics(

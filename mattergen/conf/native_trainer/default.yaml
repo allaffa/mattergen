@@ -12,5 +12,7 @@ amp_dtype: float16
 log_every_n_steps: 10
 # Set false when resuming with a changed scheduler config.
 restore_scheduler_states: true
+# Per-rank data/forward/backward timing every N steps (0 = off); adds a device sync and all_gather.
+step_timing_every_n_steps: 0
 debug_ddp: false
 debug_ddp_steps: 2
