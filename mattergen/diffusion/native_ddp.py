@@ -42,6 +42,27 @@ class _NonFiniteGradientHookState:
         self.sample_ids: list[int] = []
         self.structure_ids: list[str] = []
         self.logged = False
+        self.pending: list[tuple[int, torch.Tensor]] = []
+
+    def flush(self) -> None:
+        pending, self.pending = self.pending, []
+        if self.logged:
+            return
+        for bucket_index, finite in pending:
+            if not bool(finite.item()):
+                logger.error(
+                    "%s non-finite local gradient before all-reduce epoch=%s step=%s "
+                    "global_step=%s bucket=%s sample_ids=%s structure_ids=%s",
+                    _rank_prefix(self.rank),
+                    self.epoch,
+                    self.step,
+                    self.global_step,
+                    bucket_index,
+                    self.sample_ids,
+                    self.structure_ids,
+                )
+                self.logged = True
+                return
 
     def set_batch(self, batch: Any, *, epoch: int, step: int, global_step: int) -> None:
         self.epoch = epoch
@@ -62,19 +83,9 @@ def _nonfinite_logging_allreduce_hook(
     state: _NonFiniteGradientHookState,
     bucket: dist.GradBucket,
 ) -> torch.futures.Future[torch.Tensor]:
-    if not state.logged and not torch.isfinite(bucket.buffer()).all().item():
-        logger.error(
-            "%s non-finite local gradient before all-reduce epoch=%s step=%s "
-            "global_step=%s bucket=%s sample_ids=%s structure_ids=%s",
-            _rank_prefix(state.rank),
-            state.epoch,
-            state.step,
-            state.global_step,
-            bucket.index(),
-            state.sample_ids,
-            state.structure_ids,
-        )
-        state.logged = True
+    # Host sync inside the comm hook crashes on XPU (urEventWait); check is resolved in flush().
+    if not state.logged:
+        state.pending.append((bucket.index(), torch.isfinite(bucket.buffer()).all()))
     return default_hooks.allreduce_hook(state.process_group, bucket)
 
 
@@ -201,6 +212,16 @@ def _mean_reduce(value: torch.Tensor, distributed: bool) -> torch.Tensor:
         dist.all_reduce(value, op=dist.ReduceOp.SUM)
         value = value / dist.get_world_size()
     return value
+
+
+def _mean_reduce_loss_and_metrics(
+    loss: torch.Tensor, metrics: dict, distributed: bool
+) -> tuple[torch.Tensor, dict]:
+    # Single-element all-reduces are unreliable on XCCL; reduce loss with the metrics in one tensor.
+    keys = tuple(metrics)
+    packed = torch.stack([loss.detach().float()] + [metrics[k].detach().float() for k in keys])
+    reduced = _mean_reduce(packed, distributed)
+    return reduced[0], dict(zip(keys, reduced[1:]))
 
 
 def _format_cond_metrics(metrics: dict) -> str:
@@ -781,6 +802,8 @@ def fit(
 
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
+                if nonfinite_hook_state is not None:
+                    nonfinite_hook_state.flush()
                 scaler.unscale_(optimizer)
 
                 if debug_ddp and step_idx < debug_steps:
@@ -804,6 +827,8 @@ def fit(
                 if step_idx == 0:
                     trace_rank("before_first_backward")
                 loss.backward()
+                if nonfinite_hook_state is not None:
+                    nonfinite_hook_state.flush()
                 if step_idx == 0:
                     trace_rank("after_first_backward")
 
@@ -836,7 +861,7 @@ def fit(
                     break
 
 
-            reduced_loss = _mean_reduce(loss.detach(), distributed)
+            reduced_loss, reduced_metrics = _mean_reduce_loss_and_metrics(loss, _metrics, distributed)
             reduced_loss_value = float(reduced_loss.item())
             _step_schedulers(
                 scheduler_cfgs,
@@ -894,11 +919,6 @@ def fit(
 
             should_log = step_idx % int(native_cfg.get("log_every_n_steps", 50)) == 0
             if should_log:
-                metric_keys = tuple(_metrics)
-                reduced_metric_values = _mean_reduce(
-                    torch.stack([_metrics[key].detach().float() for key in metric_keys]), distributed
-                )
-                reduced_metrics = dict(zip(metric_keys, reduced_metric_values))
                 if _is_rank_zero(rank):
                     logger.info(
                         "epoch=%s step=%s lr=%1.2e loss_train=%.6f pos_train=%.6f cell_train=%.6f  atom_train=%.6f",
@@ -943,15 +963,10 @@ def fit(
                 for batch in val_loader:
                     batch = _to_device(batch, device)
                     loss, _metrics = calc_loss(model.module, batch) if distributed else calc_loss(model, batch)
-                    reduced_loss = _mean_reduce(loss.detach(), distributed)
-                    val_metrics = {key:float(_mean_reduce(_metrics[key].detach(),distributed).item())+val for key,val in val_metrics.items()}
-                    cond_keys = sorted(k for k in _metrics if k.startswith("cond/"))
-                    if cond_keys:
-                        reduced_cond = _mean_reduce(
-                            torch.stack([_metrics[k].detach().float() for k in cond_keys]), distributed
-                        )
-                        for k, v in zip(cond_keys, reduced_cond.tolist()):
-                            val_cond_metrics[k] = val_cond_metrics.get(k, 0.0) + v
+                    reduced_loss, reduced_val = _mean_reduce_loss_and_metrics(loss, _metrics, distributed)
+                    val_metrics = {key:float(reduced_val[key].item())+val for key,val in val_metrics.items()}
+                    for k in sorted(k for k in reduced_val if k.startswith("cond/")):
+                        val_cond_metrics[k] = val_cond_metrics.get(k, 0.0) + float(reduced_val[k].item())
                     val_loss_sum += float(reduced_loss.item())
                     val_steps += 1
             val_loss = val_loss_sum / max(val_steps, 1)
