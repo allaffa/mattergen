@@ -61,6 +61,12 @@ RESUBMITS_LEFT="${RESUBMITS_LEFT:-0}"
 # Set to 1 only when resuming with a changed scheduler config; follow-up jobs reset it to 0.
 RESET_SCHEDULERS="${RESET_SCHEDULERS:-0}"
 
+# Fail before staging the env on all nodes if the dataset copy is missing.
+if [[ "${DATA_MODULE}" == "OMat24-v2" && ! -d "${REPO_ROOT}/datasets/OMat24-v2.bp" ]]; then
+    echo "ERROR: ${REPO_ROOT}/datasets/OMat24-v2.bp not found; run installation_scripts/copy_omat24_dataset.sh first." >&2
+    exit 1
+fi
+
 # A fixed Hydra output dir lets follow-up jobs find the previous job's last.ckpt.
 if [[ -z "${OUTPUT_DIR:-}" && "${RESUBMITS_LEFT}" -gt 0 ]]; then
     OUTPUT_DIR="${REPO_ROOT}/outputs/chain-${SLURM_JOB_ID}"

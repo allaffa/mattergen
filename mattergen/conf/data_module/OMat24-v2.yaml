@@ -22,7 +22,8 @@ transforms:
   _partial_: true
 
 average_density: 0.05 # atoms/Angstrom**3
-root_dir: /lustre/orion/lrn110/world-shared/mlupopa/MatterGen/mattergen/datasets/OMat24-v2.bp
+# Copy made by installation_scripts/copy_omat24_dataset.sh; PROJECT_ROOT is the mattergen package dir.
+root_dir: ${oc.env:PROJECT_ROOT}/../datasets/OMat24-v2.bp
 #root_dir: /DATA-A/DATA-B_copy/Patxi/lrn070/miniOMat24-forces-3M.bp
 
 train_dataset:
