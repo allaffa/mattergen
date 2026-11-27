@@ -211,6 +211,9 @@ PY
 banner "Install MatterGen package (editable, no extra deps)"
 pip_retry -e "$REPO_ROOT" --no-deps
 
+banner "Install py-spy (stack sampling for stuck/slow ranks)"
+pip_retry py-spy
+
 
 
 # ============================================================

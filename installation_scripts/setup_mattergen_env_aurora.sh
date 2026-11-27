@@ -267,6 +267,9 @@ pip_retry --no-deps "mattersim>=1.1" "torch-ema>=0.3" "torchmetrics>=0.10" \
 banner "Install MatterGen (editable, --no-deps)"
 pip_retry --no-deps -e "${REPO_ROOT}"
 
+banner "Install py-spy (stack sampling for stuck/slow ranks)"
+pip_retry py-spy
+
 banner "Verify environment"
 export VENV_PATH REPO_ROOT
 python - <<'PY'

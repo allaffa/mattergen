@@ -191,6 +191,8 @@ python -m pip install \
 # training always imports the user's current checkout after staging.
 python -m pip install --no-deps "${REPO_ROOT}"
 
+python -m pip install py-spy
+
 export REPO_ROOT
 export PYTHONPATH="${REPO_ROOT}"
 python - <<'PY'
